@@ -1,0 +1,60 @@
+// For format details, see https://aka.ms/devcontainer.json.
+{
+	"name": "ROS noetic",
+	"image": "tum-ics-ros:noetic-ics-msbrdm-devel-vscode",
+
+	"containerEnv" : {
+		"CONT_PWD" : "${containerWorkspaceFolder}",
+		"DISPLAY" : "${localEnv:DISPLAY}",
+		"QT_X11_NO_MITSHM" : "1"
+	},
+
+	"remoteUser": "devel",
+
+	"remoteEnv": { 
+		"DISPLAY": "${localEnv:DISPLAY}" 
+	},
+
+	"runArgs": [
+		"--name", "${containerWorkspaceFolderBasename}_devcont",
+		"--hostname", "${containerWorkspaceFolderBasename}_devcont",
+		"--privileged",
+    	"--net=host",
+		"--runtime=nvidia" 
+	],
+
+	"mounts": [
+		{ 
+			"source": "/dev/dri", 
+			"target": "/dev/dri",
+			"type": "bind"
+		},
+		{ 
+			"source": "/tmp/.X11-unix", 
+			"target": "/tmp/.X11-unix",
+			"type": "bind"
+		},
+		{ 
+			"source": "/dev", 
+			"target": "/dev",
+			"type": "bind"
+		}
+		// ,
+		// { 
+		// 	"source": "/home/${localEnv:USER}/scripts", 
+		// 	"target": "/scripts",
+		// 	"type": "bind"
+		// }
+	],
+
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-vscode.cpptools",
+				"ms-vscode.cpptools-extension-pack",
+				"cschlosser.doxdocgen",
+				"shd101wyy.markdown-preview-enhanced"
+			]
+		}
+	}
+}

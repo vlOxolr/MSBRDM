@@ -1,0 +1,16 @@
+# catkin
+.catkin_tools/
+
+# ROS 1
+build/
+devel/
+logs/
+log/
+
+# Python
+*.pyc
+**/__pycache__
+*.egg-info
+
+# VS Code
+.vscode
