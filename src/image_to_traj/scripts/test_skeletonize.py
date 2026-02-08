@@ -7,7 +7,7 @@ from typing import Optional
 import numpy as np
 import matplotlib.pyplot as plt
 
-from skimage.io import imread
+from skimage.io import imread, imsave
 from skimage.color import rgb2gray
 from skimage.filters import threshold_otsu
 from skimage.morphology import (
@@ -17,10 +17,8 @@ from skimage.morphology import (
     skeletonize,
     rectangle,
     disk,
+    medial_axis,
 )
-
-from skimage.io import imsave
-
 
 
 def resolve_img_path(script_dir: str, filename: Optional[str]) -> str:
@@ -74,75 +72,64 @@ def main():
 
     gray = load_gray(image_path)
 
-    # --- Step 1: Binarization (required) ---
-    # Otsu thresholding, then foreground = (gray < t1) for dark strokes on bright background.
-    # If your strokes are bright on a dark background, flip to (gray > t1).
+    # --- Step 1: Binarization ---
     t1 = threshold_otsu(gray)
     binary1 = gray < t1
 
-    # --- Step 2: White top-hat (REPLACED algorithm, required) ---
-    # We replace the previous top-hat with:
-    #   inv = 1.0 - gray
-    #   tophat = white_tophat(inv, rectangle(TH_H, TH_W))
-    #
-    # Rationale:
-    # - white_tophat extracts small BRIGHT structures compared to the local background.
-    # - By inverting grayscale, DARK strokes become BRIGHT, so they can be enhanced by white_tophat.
-    #
-    # Tuning guide for TH_H / TH_W:
-    # - TH_W (width) ~ stroke thickness (start around 1x to 2x of stroke width).
-    # - TH_H (length) controls how strongly "strip-like" patterns are emphasized.
-    #   Increase TH_H if strokes are long and continuous; decrease if you lose corners/details.
+    # --- Step 2: White top-hat on inverted grayscale ---
     inv = 1.0 - gray
-
     TH_H = 15
     TH_W = 10
     selem_tophat = rectangle(TH_H, TH_W)
     tophat = white_tophat(inv, selem_tophat)
 
-    # --- Step 3: Binarization again (required) ---
-    # After top-hat, threshold the response to obtain a stroke mask.
-    #
-    # Tuning guide for TH_T:
-    # - Increase TH_T to reduce noise (cleaner, but may miss faint strokes).
-    # - Decrease TH_T to keep more strokes (more complete, but noisier).
-    # Tip: If you change TH_H/TH_W, you usually need to re-tune TH_T.
+    # --- Step 3: Binarization after top-hat ---
     TH_T = 0.2
     binary2 = tophat > TH_T
 
-    # --- Step 4: Opening (required) ---
-    # Tuning guide for OPEN_R:
-    # - Increase OPEN_R to remove thin texture / small speckles more aggressively.
-    # - Decrease OPEN_R if real strokes get eroded or broken.
+    # --- Step 4: Opening ---
     OPEN_R = 1
     opened = opening(binary2, disk(OPEN_R))
 
-    # --- Step 5: Closing (required) ---
-    # Tuning guide for CLOSE_R:
-    # - Increase CLOSE_R to connect fragmented strokes and fill small gaps.
-    # - Decrease CLOSE_R if distinct nearby strokes get merged.
+    # --- Step 5: Closing (+ an extra opening as you added) ---
     CLOSE_R = 2
     cleaned = closing(opened, disk(CLOSE_R))
-
     cleaned = opening(cleaned, disk(OPEN_R))
 
-    # --- Step 6: Skeletonization (required) ---
+    # --- Step 6a: Thinning skeleton (your original) ---
     skeleton = skeletonize(cleaned)
 
-    # --- Save skeleton result to scripts/img (required) ---
-    # Save as 8-bit image (0 or 255) to ensure consistent visualization in common viewers.
+    # --- Step 6b: Medial axis skeleton (NEW) ---
+    # medial_skel is the medial axis (centerline-like skeleton) of the filled binary region.
+    # dist is the distance transform (distance to background), useful for debugging/pruning.
+    medial_skel, dist = medial_axis(cleaned, return_distance=True)
+
+    # --- Save results to scripts/img ---
     in_base = os.path.basename(image_path)
     name, ext = os.path.splitext(in_base)
 
     cleaned_u8 = (cleaned.astype(np.uint8) * 255)
-    out_path = os.path.join(os.path.dirname(image_path), f"{name}_cleaned{ext}")
-    imsave(out_path, cleaned_u8)
-    print("[INFO] Saved cleaned binary result to: {}".format(out_path))
+    out_path_cleaned = os.path.join(os.path.dirname(image_path), f"{name}_cleaned{ext}")
+    imsave(out_path_cleaned, cleaned_u8)
+    print("[INFO] Saved cleaned binary result to: {}".format(out_path_cleaned))
 
     skeleton_u8 = (skeleton.astype(np.uint8) * 255)
-    out_path_skel = os.path.join(os.path.dirname(image_path), f"{name}_skeleton{ext}")
+    out_path_skel = os.path.join(os.path.dirname(image_path), f"{name}_skeleton_thin{ext}")
     imsave(out_path_skel, skeleton_u8)
-    print("[INFO] Saved skeleton result to: {}".format(out_path_skel))
+    print("[INFO] Saved thinning skeleton result to: {}".format(out_path_skel))
+
+    medial_u8 = (medial_skel.astype(np.uint8) * 255)
+    out_path_medial = os.path.join(os.path.dirname(image_path), f"{name}_skeleton_medial{ext}")
+    imsave(out_path_medial, medial_u8)
+    print("[INFO] Saved medial axis skeleton result to: {}".format(out_path_medial))
+
+    # Optional: save distance map for debugging (normalized to 0..255)
+    # This helps you see stroke thickness structure and where spurs might appear.
+    if dist.max() > 0:
+        dist_u8 = (dist / dist.max() * 255.0).astype(np.uint8)
+        out_path_dist = os.path.join(os.path.dirname(image_path), f"{name}_dist{ext}")
+        imsave(out_path_dist, dist_u8)
+        print("[INFO] Saved distance transform (debug) to: {}".format(out_path_dist))
 
     # --- Visualization (2 rows x 3 cols) ---
     fig, axes = plt.subplots(2, 3, figsize=(14, 8), sharex=True, sharey=True)
@@ -166,11 +153,12 @@ def main():
 
     ax[4].imshow(cleaned, cmap=plt.cm.gray)
     ax[4].axis("off")
-    ax[4].set_title("opening + closing", fontsize=12)
+    ax[4].set_title("cleaned (open+close+open)", fontsize=12)
 
-    ax[5].imshow(skeleton, cmap=plt.cm.gray)
+    # Show medial axis skeleton in the last panel (as requested)
+    ax[5].imshow(medial_skel, cmap=plt.cm.gray)
     ax[5].axis("off")
-    ax[5].set_title("skeleton", fontsize=12)
+    ax[5].set_title("medial axis skeleton", fontsize=12)
 
     fig.tight_layout()
     plt.show()
