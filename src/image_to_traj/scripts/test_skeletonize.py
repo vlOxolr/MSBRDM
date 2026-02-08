@@ -19,6 +19,9 @@ from skimage.morphology import (
     disk,
 )
 
+from skimage.io import imsave
+
+
 
 def resolve_img_path(script_dir: str, filename: Optional[str]) -> str:
     """Resolve an image path under scripts/img."""
@@ -123,6 +126,17 @@ def main():
 
     # --- Step 6: Skeletonization (required) ---
     skeleton = skeletonize(cleaned)
+
+    # --- Save skeleton result to scripts/img (required) ---
+    # Save as 8-bit image (0 or 255) to ensure consistent visualization in common viewers.
+    in_base = os.path.basename(image_path)
+    name, ext = os.path.splitext(in_base)
+    out_name = f"{name}_result{ext}"
+    out_path = os.path.join(os.path.dirname(image_path), out_name)
+
+    skeleton_u8 = (skeleton.astype(np.uint8) * 255)
+    imsave(out_path, skeleton_u8)
+    print("[INFO] Saved skeleton result to: {}".format(out_path))
 
     # --- Visualization (2 rows x 3 cols) ---
     fig, axes = plt.subplots(2, 3, figsize=(14, 8), sharex=True, sharey=True)
