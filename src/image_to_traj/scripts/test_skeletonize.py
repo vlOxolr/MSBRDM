@@ -335,6 +335,32 @@ def trace_lines(
     return filtered
 
 
+def filter_short_junction_lines(
+    lines: List[Line],
+    junction_reps: Set[Point],
+    min_len: int = 20,
+) -> List[Line]:
+    """
+    Remove short lines whose start OR end is a junction representative.
+    Rule:
+      - if line.length() < min_len and (start in junction_reps or end in junction_reps) -> drop
+    After filtering, re-index line.id to keep consistent with list indices.
+    """
+    kept: List[Line] = []
+    for ln in lines:
+        is_short = ln.length() < min_len
+        touches_junction = (ln.start in junction_reps) or (ln.end in junction_reps)
+        if is_short and touches_junction:
+            continue
+        kept.append(ln)
+
+    # re-index ids
+    for new_id, ln in enumerate(kept):
+        ln.id = new_id
+
+    return kept
+
+
 def direction_at_node(line: Line, node: Point, k: int = 5) -> np.ndarray:
     """
     Compute outward direction vector at a line end (node).
@@ -605,16 +631,26 @@ def main():
         junctions=junctions,
         jmap=jmap,
     )
-    assert all(0 <= ln.id < len(lines) for ln in lines), "Line.id is not consistent with lines list indices"
-    print("[INFO] lines: {}".format(len(lines)))
+    print("[INFO] lines (before filter): {}".format(len(lines)))
 
-    # 5) merge lines into strokes at each junction by angle similarity
-    # (use k=5 pixels direction as you required)
+    # --- NEW: filter short lines attached to junctions ---
+    MIN_JUNC_LINE_LEN = 10
+    lines = filter_short_junction_lines(
+        lines=lines,
+        junction_reps=junction_reps,
+        min_len=MIN_JUNC_LINE_LEN,
+    )
+    print("[INFO] lines (after filter): {}".format(len(lines)))
+
+    # (optional but recommended) sanity check to prevent index bugs
+    assert all(0 <= ln.id < len(lines) for ln in lines), "Line.id is not consistent with lines list indices"
+
     dsu, node_to_lines = merge_lines_into_strokes(
         lines=lines,
         junction_reps=junction_reps,
         k_dir=5,
     )
+
 
     strokes = build_stroke_polylines(lines, dsu)
     print("[INFO] strokes: {}".format(len(strokes)))
