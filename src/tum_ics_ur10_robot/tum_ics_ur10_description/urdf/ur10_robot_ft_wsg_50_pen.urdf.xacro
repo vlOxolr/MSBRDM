@@ -1,0 +1,112 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://ros.org/wiki/xacro"
+       name="ur10_wsg50_with_cylinder">
+
+  <!-- ================= Xacro arguments ================= -->
+  <!-- Keep these for compatibility with your existing bringup/launch -->
+  <xacro:arg name="prefix"  default=""/>
+  <xacro:arg name="limited" default="false"/>
+
+  <!-- ================= common stuff ================= -->
+  <xacro:include filename="$(find tum_ics_ur10_description)/urdf/gazebo.urdf.xacro" />
+  <xacro:include filename="$(find tum_ics_ur10_description)/urdf/common.xacro" />
+  <xacro:include filename="$(find wsg_50_driver)/urdf/wsg_50.urdf.xacro" />
+
+  <!-- ================= ur10 ================= -->
+  <xacro:include filename="$(find tum_ics_ur10_description)/urdf/ur10.urdf.xacro" />
+
+  <!-- Instantiate UR10 arm -->
+  <xacro:ur10_robot prefix="$(arg prefix)" joint_limited="$(arg limited)"/>
+
+  <!-- ================= world root ================= -->
+  <link name="world" />
+  <joint name="world_joint" type="fixed">
+    <parent link="world" />
+    <child link="$(arg prefix)base_link" />
+    <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0" />
+  </joint>
+
+  <!-- ================= FT sensor link ================= -->
+  <link name="ft_sensor_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.079" radius="0.0375"/>
+      </geometry>
+      <origin xyz="0.0 0.0 -0.027" rpy="0 0 0" />
+      <material name="LightGrey">
+        <color rgba="0.7 0.7 0.7 1.0"/>
+      </material>
+    </visual>
+
+    <collision>
+      <geometry>
+        <cylinder length="0.054" radius="0.0375"/>
+      </geometry>
+    </collision>
+
+    <!-- Inertial: required for Gazebo dynamics -->
+    <xacro:cylinder_inertial radius="0.0375" length="0.054" mass="0.25">
+      <origin xyz="0.0 0.0 0.0" rpy="0 0 0" />
+    </xacro:cylinder_inertial>
+  </link>
+
+  <joint name="ft_sensor_joint" type="fixed">
+    <parent link="$(arg prefix)ee_link" />
+    <child link="ft_sensor_link" />
+    <origin xyz="0.054 0.0 0.0" rpy="${pi} ${-0.5*pi} 0.0" />
+  </joint>
+
+  <!-- ================= WSG-50 gripper ================= -->
+  <xacro:wsg_50_xacro
+      name="wsg50"
+      parent="ft_sensor_link"
+      finger_length="0.023"
+      finger_tip="0.003"/>
+
+  <!-- ================================================= -->
+  <!-- Pre-grasped object (rigidly attached payload)   -->
+
+  <!-- ================================================= -->
+
+  <!-- The playload link -->
+  <link name="grasped_payload_link">
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://tum_ics_ur10_description/meshes/object.stl"
+              scale="0.01 0.01 0.01"/>
+      </geometry>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://tum_ics_ur10_description/meshes/object.stl"
+              scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.30"/>
+      <!-- inertia matrix later -->
+      <inertia
+        ixx="1e-4" ixy="0" ixz="0"
+        iyy="1e-4" iyz="0"
+        izz="1e-4"/>
+    </inertial>
+
+  </link>
+
+
+  <!-- Attach the cylinder rigidly to the gripper -->
+  <!-- IMPORTANT: parent link name depends on the WSG-50 xacro implementation. -->
+  <!-- Common candidates: wsg50_tcp, wsg50_tool, wsg50_grasp_frame, wsg50_base_link -->
+  <joint name="ft_to_grasped_playload_joint" type="fixed">
+    <parent link="ft_sensor_link"/>
+    <child link="grasped_payload_link"/>
+    <origin xyz="-0.02 -0.016 0.0" rpy="0 0 0"/>
+  </joint>
+
+</robot>

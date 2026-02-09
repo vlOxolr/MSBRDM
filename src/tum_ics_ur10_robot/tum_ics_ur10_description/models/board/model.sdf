@@ -1,0 +1,54 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <model name="board">
+
+    <!-- Board is fixed in the environment -->
+    <static>true</static>
+
+    <link name="link">
+
+      <!-- Pose relative to model frame -->
+      <pose>0 0 0 0 0 0</pose>
+
+      <!-- Collision: used for physics interaction -->
+      <collision name="collision">
+        <geometry>
+          <mesh>
+            <uri>model://board/meshes/board.stl</uri>
+            <!-- OpenSCAD model is in cm -->
+            <scale>0.01 0.01 0.01</scale>
+          </mesh>
+        </geometry>
+
+        <!-- Contact & friction parameters -->
+        <surface>
+          <friction>
+            <ode>
+              <mu>0.6</mu>
+              <mu2>0.6</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>1000000</kp>
+              <kd>50</kd>
+              <max_vel>0.05</max_vel>
+              <min_depth>0.001</min_depth>
+            </ode>
+          </contact>
+        </surface>
+      </collision>
+
+      <!-- Visual: what you see -->
+      <visual name="visual">
+        <geometry>
+          <mesh>
+            <uri>model://board/meshes/board.stl</uri>
+            <scale>0.01 0.01 0.01</scale>
+          </mesh>
+        </geometry>
+      </visual>
+
+    </link>
+  </model>
+</sdf>
