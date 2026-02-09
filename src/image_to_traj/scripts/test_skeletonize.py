@@ -19,9 +19,21 @@ from skimage.morphology import (
     medial_axis,
 )
 
+from tqdm import tqdm
+
+# Try to use scipy for fast convolution / KDTree; fallback to numpy brute force if not available.
+try:
+    from scipy.ndimage import convolve as ndi_convolve
+except Exception:
+    ndi_convolve = None
+
+try:
+    from scipy.spatial import cKDTree
+except Exception:
+    cKDTree = None
+
 
 Point = Tuple[int, int]  # (row, col)
-EdgeId = int
 
 
 def resolve_img_path(script_dir: str, filename: Optional[str]) -> str:
@@ -74,396 +86,445 @@ def neighbors8(p: Point, shape: Tuple[int, int]) -> List[Point]:
     return out
 
 
-def degree_map(skel: np.ndarray) -> np.ndarray:
-    """Degree (# of 8-neighbors that are True) for skeleton pixels."""
-    deg = np.zeros_like(skel, dtype=np.uint8)
-    pts = np.argwhere(skel)
-    for r, c in pts:
-        p = (int(r), int(c))
-        cnt = 0
-        for q in neighbors8(p, skel.shape):
-            if skel[q]:
-                cnt += 1
-        deg[p] = cnt
-    return deg
+# -------------------- New method (from medial_skel) --------------------
 
-
-def extract_nodes(skel: np.ndarray, deg: np.ndarray) -> Tuple[Set[Point], Set[Point], Set[Point]]:
+def neighbor_count_8(skel: np.ndarray) -> np.ndarray:
     """
-    Extract node sets:
-    - endpoints: degree == 1
-    - junctions: degree >= 3
-    - isolated: degree == 0 (single pixel components)
+    Count 8-neighbor skeleton pixels for each pixel.
+    Implemented with convolution + padding (output shape unchanged).
     """
-    endpoints = set(map(tuple, np.argwhere(skel & (deg == 1)).astype(int)))
-    junctions = set(map(tuple, np.argwhere(skel & (deg >= 3)).astype(int)))
-    isolated = set(map(tuple, np.argwhere(skel & (deg == 0)).astype(int)))
-    return endpoints, junctions, isolated
+    sk = skel.astype(np.uint8)
+
+    kernel = np.array(
+        [[1, 1, 1],
+         [1, 0, 1],
+         [1, 1, 1]], dtype=np.uint8
+    )
+
+    if ndi_convolve is not None:
+        # mode='constant' with cval=0 ensures padding without changing size
+        cnt = ndi_convolve(sk, kernel, mode="constant", cval=0)
+        return cnt.astype(np.uint8)
+
+    # Fallback: manual convolution (still padded, but slower)
+    H, W = sk.shape
+    pad = np.pad(sk, ((1, 1), (1, 1)), mode="constant", constant_values=0)
+    cnt = np.zeros((H, W), dtype=np.uint8)
+    for r in range(H):
+        for c in range(W):
+            win = pad[r:r+3, c:c+3]
+            cnt[r, c] = int(np.sum(win * kernel))
+    return cnt
 
 
-def trace_segment_from_node(
-    skel: np.ndarray,
-    deg: np.ndarray,
-    start_node: Point,
-    next_pixel: Point,
-    node_set: Set[Point],
-    visited_dir: Set[Tuple[Point, Point]],
-) -> List[Point]:
+def classify_pixels(skel: np.ndarray, cnt: np.ndarray) -> Dict[str, Set[Point]]:
     """
-    Trace a segment starting at start_node and stepping into next_pixel.
-    The segment ends when reaching another node (endpoint or junction) or dead-end.
-    visited_dir stores directed traversals to avoid duplicating segments.
+    Classification per your definition (only for skeleton pixels):
+    - cnt == 0 : isolated node
+    - cnt == 1 : endpoint
+    - cnt == 2 : track point
+    - cnt >= 3 : junction point
     """
-    seg = [start_node]
-    prev = start_node
-    cur = next_pixel
-
-    visited_dir.add((start_node, next_pixel))
-
-    while True:
-        seg.append(cur)
-
-        if cur in node_set and cur != start_node:
-            break
-
-        nbs = [q for q in neighbors8(cur, skel.shape) if skel[q]]
-        if len(nbs) == 0:
-            break
-
-        # remove coming-from pixel
-        nbs2 = [q for q in nbs if q != prev]
-        if len(nbs2) == 0:
-            break
-
-        # if multiple choices (near junction/noise), pick the one not immediately visited
-        nxt = None
-        for cand in nbs2:
-            if (cur, cand) not in visited_dir:
-                nxt = cand
-                break
-        if nxt is None:
-            nxt = nbs2[0]
-
-        visited_dir.add((cur, nxt))
-        prev, cur = cur, nxt
-
-    return seg
+    sk = skel.astype(bool)
+    iso = set(map(tuple, np.argwhere(sk & (cnt == 0)).astype(int)))
+    endp = set(map(tuple, np.argwhere(sk & (cnt == 1)).astype(int)))
+    track = set(map(tuple, np.argwhere(sk & (cnt == 2)).astype(int)))
+    junc = set(map(tuple, np.argwhere(sk & (cnt >= 3)).astype(int)))
+    return {"isolated": iso, "endpoints": endp, "track": track, "junctions": junc}
 
 
-def extract_segments(skel: np.ndarray, deg: np.ndarray) -> Tuple[List[List[Point]], Set[Point], Set[Point], Set[Point]]:
+def cluster_junctions(junctions: List[Point], radius: float = 10.0) -> Tuple[List[List[Point]], Dict[Point, Point]]:
     """
-    Split skeleton into segments between nodes (endpoints/junctions).
-    Returns:
-    - segments: list of polyline pixel chains, each begins/ends at a node (or dead end)
-    - endpoints, junctions, isolated points
+    Group junction pixels into junction-groups if within Euclidean radius.
+    Return:
+    - clusters: list of clusters (each is list of junction pixels)
+    - map_old_to_rep: mapping old junction pixel -> representative (median) point
     """
-    endpoints, junctions, isolated = extract_nodes(skel, deg)
-    node_set = set(endpoints) | set(junctions)
+    if len(junctions) == 0:
+        return [], {}
 
-    visited_dir: Set[Tuple[Point, Point]] = set()
-    segments: List[List[Point]] = []
+    pts = np.array(junctions, dtype=np.float32)
 
-    # Start segments from each node, for each neighbor direction
-    for node in sorted(node_set):
-        nbs = [q for q in neighbors8(node, skel.shape) if skel[q]]
-        for nb in nbs:
-            if (node, nb) in visited_dir:
-                continue
-            seg = trace_segment_from_node(skel, deg, node, nb, node_set, visited_dir)
-            if len(seg) >= 2:
-                segments.append(seg)
+    # Find neighbors efficiently if KDTree is available; else brute force.
+    if cKDTree is not None:
+        tree = cKDTree(pts)
+        nbrs = tree.query_ball_tree(tree, r=radius)
+        # nbrs[i] gives indices within radius of i (including itself)
+    else:
+        # brute force adjacency list
+        nbrs = []
+        for i in range(len(pts)):
+            d = np.linalg.norm(pts - pts[i], axis=1)
+            nbrs.append(list(np.where(d <= radius)[0]))
 
-    # Handle cycles with no endpoints/junctions (all degree==2)
-    # We find remaining unvisited skeleton pixels and trace a loop as a segment.
-    unvisited = skel.copy()
-    for (a, b) in visited_dir:
-        unvisited[a] = False
-        unvisited[b] = False
+    visited = np.zeros(len(pts), dtype=bool)
+    clusters: List[List[Point]] = []
+    map_old_to_rep: Dict[Point, Point] = {}
 
-    # Robust loop extraction: any pixel that is True but not in node_set and still exists may form a loop.
-    loop_candidates = np.argwhere(skel & (~np.isin(np.arange(skel.size).reshape(skel.shape), [])))
-    # We will do a simpler pass: find pixels with deg==2 that are not in any segment.
-    covered = np.zeros_like(skel, dtype=bool)
-    for seg in segments:
-        for p in seg:
-            covered[p] = True
-    remain = np.argwhere(skel & (~covered) & (deg == 2))
-    remain = [tuple(map(int, p)) for p in remain]
-
-    visited_loop = set()
-    for start in remain:
-        if start in visited_loop:
+    for i in tqdm(range(len(pts)), desc="Clustering junctions", leave=False):
+        if visited[i]:
             continue
-        # trace loop
-        loop = [start]
-        visited_loop.add(start)
-        prev = None
-        cur = start
-        for _ in range(200000):
-            nbs = [q for q in neighbors8(cur, skel.shape) if skel[q]]
-            if prev is not None:
-                nbs = [q for q in nbs if q != prev]
-            if len(nbs) == 0:
-                break
-            nxt = nbs[0]
-            prev, cur = cur, nxt
-            if cur == start:
-                loop.append(cur)
-                break
-            if cur in visited_loop:
-                break
-            loop.append(cur)
-            visited_loop.add(cur)
-        if len(loop) >= 3:
-            segments.append(loop)
+        # BFS/DFS to form one cluster
+        stack = [i]
+        visited[i] = True
+        idxs = []
+        while stack:
+            cur = stack.pop()
+            idxs.append(cur)
+            for nb in nbrs[cur]:
+                if not visited[nb]:
+                    visited[nb] = True
+                    stack.append(nb)
 
-    return segments, endpoints, junctions, isolated
+        cluster = [junctions[k] for k in idxs]
+        clusters.append(cluster)
 
+        # representative = median coordinate (rounded to int)
+        arr = np.array(cluster, dtype=np.int32)
+        rep_r = int(np.median(arr[:, 0]))
+        rep_c = int(np.median(arr[:, 1]))
+        rep = (rep_r, rep_c)
 
-def segment_endpoints(seg: List[Point]) -> Tuple[Point, Point]:
-    return seg[0], seg[-1]
+        for p in cluster:
+            map_old_to_rep[p] = rep
+
+    return clusters, map_old_to_rep
 
 
-def build_graph_from_segments(segments: List[List[Point]]) -> Tuple[Dict[Point, List[EdgeId]], Dict[EdgeId, Tuple[Point, Point]]]:
-    """
-    Build a node-edge adjacency graph from segments.
-    Nodes are segment endpoints (pixel coordinates).
-    """
-    node_to_edges: Dict[Point, List[EdgeId]] = {}
-    edge_to_nodes: Dict[EdgeId, Tuple[Point, Point]] = {}
+class Line:
+    def __init__(self, lid: int, points: List[Point], start_node: Point, end_node: Point):
+        self.id = lid
+        self.points = points
+        self.start = start_node
+        self.end = end_node
 
-    for eid, seg in enumerate(segments):
-        a, b = segment_endpoints(seg)
-        edge_to_nodes[eid] = (a, b)
-        node_to_edges.setdefault(a, []).append(eid)
-        node_to_edges.setdefault(b, []).append(eid)
-
-    return node_to_edges, edge_to_nodes
+    def length(self) -> int:
+        return len(self.points)
 
 
-def prune_short_spurs(
-    segments: List[List[Point]],
+def trace_lines(
+    skel: np.ndarray,
+    cnt: np.ndarray,
     endpoints: Set[Point],
     junctions: Set[Point],
-    spur_len_thresh: int = 3,
-) -> List[List[Point]]:
+    jmap: Dict[Point, Point],
+) -> List[Line]:
     """
-    Remove short spur segments attached to a junction, but keep isolated short segments (likely dots).
-    Rule:
-    - If len(segment) < spur_len_thresh AND one end is a junction AND the other end is an endpoint -> remove it.
-    - If both ends are endpoints (isolated short stroke) -> keep it.
-    - If both ends are junctions (rare) -> keep it.
+    Build lines:
+    start/end are endpoint or junction (mapped to representative if junction-grouped).
+    Middle are track points (cnt==2), and each track point can belong to ONLY ONE line.
+
+    Strategy:
+    - Start from all endpoints + all junction pixels (but treat junction nodes using representative).
+    - For each node pixel, follow each neighbor direction into skeleton:
+      accumulate until reaching endpoint or junction; stop.
+    - Track points are marked used so they won't be reused in another line.
     """
-    kept: List[List[Point]] = []
-    for seg in segments:
-        L = len(seg)
-        a, b = segment_endpoints(seg)
-        is_spur = (L < spur_len_thresh) and (
-            (a in junctions and b in endpoints) or (b in junctions and a in endpoints)
-        )
-        if not is_spur:
-            kept.append(seg)
-    return kept
+    H, W = skel.shape
+    sk = skel.astype(bool)
+
+    # Node pixels in raw skeleton space (endpoints + junction pixels)
+    node_pixels = set(endpoints) | set(junctions)
+
+    used_track: Set[Point] = set()
+    used_directed: Set[Tuple[Point, Point]] = set()  # avoid duplicating immediate traversals
+
+    # Helper: is junction pixel?
+    def is_junction_pix(p: Point) -> bool:
+        return p in junctions
+
+    # Helper: map node pixel to canonical node coordinate
+    def canon_node(p: Point) -> Point:
+        if p in jmap:
+            return jmap[p]
+        return p
+
+    lines: List[Line] = []
+    lid = 0
+
+    # We iterate nodes with tqdm for visibility
+    for node in tqdm(sorted(node_pixels), desc="Tracing lines from nodes"):
+        # if node is a track or isolated, skip (should not happen)
+        if not sk[node]:
+            continue
+
+        nbs = [q for q in neighbors8(node, (H, W)) if sk[q]]
+        for nb in nbs:
+            if (node, nb) in used_directed:
+                continue
+
+            # We will trace one candidate line
+            pts = [node]
+            prev = node
+            cur = nb
+            used_directed.add((node, nb))
+
+            # If first step is a track point already used, we skip to avoid duplicating lines
+            if (cnt[cur] == 2) and (cur in used_track):
+                continue
+
+            while True:
+                pts.append(cur)
+
+                # stop if reach a different node pixel (endpoint or junction)
+                if cur in node_pixels and cur != node:
+                    break
+
+                # stop if dead
+                nbrs = [q for q in neighbors8(cur, (H, W)) if sk[q]]
+                if len(nbrs) == 0:
+                    break
+
+                # remove coming-from pixel
+                nbrs2 = [q for q in nbrs if q != prev]
+                if len(nbrs2) == 0:
+                    break
+
+                # choose next not yet traversed if possible
+                nxt = None
+                for cand in nbrs2:
+                    if (cur, cand) not in used_directed:
+                        nxt = cand
+                        break
+                if nxt is None:
+                    nxt = nbrs2[0]
+
+                # mark directed step
+                used_directed.add((cur, nxt))
+
+                prev, cur = cur, nxt
+
+                # if cur is track point, and already used, then we should stop early to avoid overlap
+                if (cnt[cur] == 2) and (cur in used_track):
+                    # remove the overlapping point to keep consistency
+                    pts.pop()
+                    break
+
+            # Determine canonical endpoints
+            raw_start = pts[0]
+            raw_end = pts[-1]
+            start_node = canon_node(raw_start) if (raw_start in node_pixels) else raw_start
+            end_node = canon_node(raw_end) if (raw_end in node_pixels) else raw_end
+
+            # Only accept if it's a meaningful line:
+            # - must include at least 2 points
+            # - must end at endpoint/junction (or dead end pixel) but your definition expects endpoint/junction;
+            #   here we keep dead-end too, but it usually indicates noise.
+            if len(pts) < 2:
+                continue
+
+            # Mark track points used (excluding endpoints/junction pixels)
+            for p in pts[1:-1]:
+                if cnt[p] == 2:
+                    used_track.add(p)
+
+            lines.append(Line(lid, pts, start_node, end_node))
+            lid += 1
+
+    # Optional: deduplicate trivial self-loops (start==end and too short)
+    filtered: List[Line] = []
+    for ln in lines:
+        if ln.start == ln.end and ln.length() <= 3:
+            continue
+        filtered.append(ln)
+
+    # IMPORTANT: re-index line ids to match list indices (avoid IndexError later)
+    for new_id, ln in enumerate(filtered):
+        ln.id = new_id
+
+    return filtered
 
 
-def tangent_at_node(seg: List[Point], node: Point, k: int = 5) -> np.ndarray:
+def direction_at_node(line: Line, node: Point, k: int = 5) -> np.ndarray:
     """
-    Estimate direction vector of a segment at a given endpoint node.
-    We take k pixels away from the node to compute a local tangent.
+    Compute outward direction vector at a line end (node).
+    Use k pixels along the polyline.
+    Returns a normalized vector in (dr, dc).
     """
-    if len(seg) < 2:
+    pts = line.points
+    if len(pts) < 2:
         return np.array([0.0, 0.0], dtype=np.float32)
 
-    if seg[0] == node:
-        p0 = np.array(seg[0], dtype=np.float32)
-        p1 = np.array(seg[min(k, len(seg) - 1)], dtype=np.float32)
-    elif seg[-1] == node:
-        p0 = np.array(seg[-1], dtype=np.float32)
-        p1 = np.array(seg[max(0, len(seg) - 1 - k)], dtype=np.float32)
+    # Need to detect whether 'node' corresponds to start or end of the line in canonical space.
+    # Since junction pixels were mapped to representative, the point list may contain raw junction pixels,
+    # but the line.start/line.end are canonical. We'll treat:
+    # - if node == line.start -> use early segment direction
+    # - if node == line.end   -> use late segment direction
+    if node == line.start:
+        p0 = np.array(pts[0], dtype=np.float32)
+        p1 = np.array(pts[min(k, len(pts) - 1)], dtype=np.float32)
+        v = p1 - p0
+    elif node == line.end:
+        p0 = np.array(pts[-1], dtype=np.float32)
+        p1 = np.array(pts[max(0, len(pts) - 1 - k)], dtype=np.float32)
+        v = p1 - p0  # from node to inner -> outward along the line away from the node is (p1 - p0)
     else:
-        # node not an endpoint of the segment
-        p0 = np.array(node, dtype=np.float32)
-        p1 = p0.copy()
+        return np.array([0.0, 0.0], dtype=np.float32)
 
-    v = p1 - p0  # (dr, dc)
     n = float(np.linalg.norm(v))
     if n < 1e-6:
         return np.array([0.0, 0.0], dtype=np.float32)
     return v / n
 
 
-def turn_angle(v_in: np.ndarray, v_out: np.ndarray) -> float:
+def angle_for_pair(v1: np.ndarray, v2: np.ndarray) -> float:
     """
-    Turning angle definition:
-    - v_in points OUTWARD from junction along the incoming segment.
-    - v_out points OUTWARD from junction along the candidate outgoing segment.
-    We want small bending => v_out ~ -v_in.
-    So we compute angle between (-v_in) and v_out.
+    We want to merge two lines through a junction to make it as straight as possible.
+    If v1 and v2 are both outward from the junction, straight-through means v2 ≈ -v1.
+    So angle = arccos( clamp( dot(v1, -v2) ) ).
     """
-    a = -v_in
-    b = v_out
+    a = v1
+    b = -v2
     dot = float(np.clip(np.dot(a, b), -1.0, 1.0))
-    return float(np.arccos(dot))  # 0 is best (straight), pi is worst
+    return float(np.arccos(dot))
 
 
-def build_junction_pairing(
-    segments: List[List[Point]],
-    node_to_edges: Dict[Point, List[EdgeId]],
-    edge_to_nodes: Dict[EdgeId, Tuple[Point, Point]],
-    junctions: Set[Point],
-    short_edge_len: int = 30,
-) -> Dict[Tuple[Point, EdgeId], EdgeId]:
+class DSU:
+    def __init__(self, n: int):
+        self.p = list(range(n))
+        self.r = [0] * n
+
+    def find(self, x: int) -> int:
+        while self.p[x] != x:
+            self.p[x] = self.p[self.p[x]]
+            x = self.p[x]
+        return x
+
+    def union(self, a: int, b: int):
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        if self.r[ra] < self.r[rb]:
+            ra, rb = rb, ra
+        self.p[rb] = ra
+        if self.r[ra] == self.r[rb]:
+            self.r[ra] += 1
+
+
+def merge_lines_into_strokes(
+    lines: List[Line],
+    junction_reps: Set[Point],
+    k_dir: int = 5,
+) -> Tuple[DSU, Dict[Point, List[int]]]:
     """
-    For each junction node with degree >= 3, pair incident edges to define "through connections".
-    Preference:
-    - Prefer pairing among short segments (len <= short_edge_len)
-    - Within candidates, choose pair with smallest turning angle.
-
-    Returns mapping:
-    - (junction, incoming_edge) -> outgoing_edge
-    symmetric for the paired direction.
+    For each junction representative node:
+    - gather incident lines (line.start==j or line.end==j)
+    - compute direction vectors at junction
+    - greedily pair the two most "straight" lines (min angle) and union them
     """
-    pair_map: Dict[Tuple[Point, EdgeId], EdgeId] = {}
+    n = len(lines)
+    dsu = DSU(n)
 
-    # Precompute segment length and tangents at node
-    seg_len = [len(s) for s in segments]
+    node_to_lines: Dict[Point, List[int]] = {}
+    for ln in lines:
+        node_to_lines.setdefault(ln.start, []).append(ln.id)
+        node_to_lines.setdefault(ln.end, []).append(ln.id)
 
-    for j in junctions:
-        inc = node_to_edges.get(j, [])
-        if len(inc) < 3:
+    for j in tqdm(sorted(junction_reps), desc="Merging lines at junctions"):
+        inc = node_to_lines.get(j, [])
+        if len(inc) < 2:
             continue
 
-        # Build direction vectors for each incident edge at this junction
-        v_out: Dict[EdgeId, np.ndarray] = {}
-        for eid in inc:
-            v_out[eid] = tangent_at_node(segments[eid], j, k=5)
+        # compute outward directions for each incident line at this junction
+        dirs: Dict[int, np.ndarray] = {}
+        for lid in inc:
+            dirs[lid] = direction_at_node(lines[lid], j, k=k_dir)
 
-        # Greedy pairing
         remaining = set(inc)
-
-        def best_pair(candidates: List[EdgeId]) -> Optional[Tuple[EdgeId, EdgeId, float]]:
-            best = None
-            for e1 in candidates:
-                for e2 in candidates:
-                    if e2 <= e1:
-                        continue
-                    ang = turn_angle(v_out[e1], v_out[e2])
-                    if best is None or ang < best[2]:
-                        best = (e1, e2, ang)
-            return best
-
         while len(remaining) >= 2:
-            # Prefer short edges if possible
-            short_edges = [e for e in remaining if seg_len[e] <= short_edge_len]
-            cand = short_edges if len(short_edges) >= 2 else list(remaining)
+            best = None  # (angle, l1, l2)
+            rem_list = list(remaining)
+            for a in range(len(rem_list)):
+                for b in range(a + 1, len(rem_list)):
+                    l1, l2 = rem_list[a], rem_list[b]
+                    ang = angle_for_pair(dirs[l1], dirs[l2])
+                    if best is None or ang < best[0]:
+                        best = (ang, l1, l2)
 
-            bp = best_pair(cand)
-            if bp is None:
+            if best is None:
                 break
-            e1, e2, _ = bp
 
-            # Register pairing both ways at this junction
-            pair_map[(j, e1)] = e2
-            pair_map[(j, e2)] = e1
+            _, l1, l2 = best
+            dsu.union(l1, l2)
+            remaining.remove(l1)
+            remaining.remove(l2)
 
-            remaining.remove(e1)
-            remaining.remove(e2)
-
-    return pair_map
+    return dsu, node_to_lines
 
 
-def other_node(edge_nodes: Tuple[Point, Point], node: Point) -> Point:
-    a, b = edge_nodes
-    return b if node == a else a
-
-
-def build_continuous_polylines(
-    segments: List[List[Point]],
-    node_to_edges: Dict[Point, List[EdgeId]],
-    edge_to_nodes: Dict[EdgeId, Tuple[Point, Point]],
-    pair_map: Dict[Tuple[Point, EdgeId], EdgeId],
-) -> List[List[Point]]:
+def build_stroke_polylines(lines: List[Line], dsu: DSU) -> List[List[Point]]:
     """
-    Merge segments into continuous polylines with no branching.
-    We walk edge-by-edge, continuing through nodes using:
-    - If node has degree==2: continue along the other edge.
-    - If node has degree>=3 (junction): continue only if a pairing exists for (node, incoming_edge).
-      Otherwise stop.
+    Convert DSU groups to ordered stroke polylines.
+    We build a small graph of line endpoints inside each group, then traverse.
     """
-    used: Set[EdgeId] = set()
-    polylines: List[List[Point]] = []
+    groups: Dict[int, List[int]] = {}
+    for ln in lines:
+        g = dsu.find(ln.id)
+        groups.setdefault(g, []).append(ln.id)
 
-    # Helper: get ordered segment points so that it starts at 'from_node'
-    def oriented_segment(eid: EdgeId, from_node: Point) -> List[Point]:
-        seg = segments[eid]
-        a, b = edge_to_nodes[eid]
-        if seg[0] == from_node:
-            return seg
-        if seg[-1] == from_node:
-            return seg[::-1]
-        # fallback: orient by closest endpoint
-        if from_node == a:
-            return seg
-        return seg[::-1]
+    stroke_polys: List[List[Point]] = []
 
-    for eid0 in range(len(segments)):
-        if eid0 in used:
+    for g, lids in groups.items():
+        if len(lids) == 1:
+            stroke_polys.append(lines[lids[0]].points)
             continue
 
-        a0, b0 = edge_to_nodes[eid0]
+        # Build node -> incident line ids (within this group)
+        node_adj: Dict[Point, List[int]] = {}
+        for lid in lids:
+            ln = lines[lid]
+            node_adj.setdefault(ln.start, []).append(lid)
+            node_adj.setdefault(ln.end, []).append(lid)
 
-        # Build forward from a0 -> ...
-        path_fwd: List[Point] = []
-        cur_node = a0
-        incoming_eid = eid0
-        seg_pts = oriented_segment(incoming_eid, cur_node)
-        path_fwd.extend(seg_pts)
-        used.add(incoming_eid)
-        cur_node = seg_pts[-1]  # next node
+        # Find a start node with degree 1 (an endpoint of the stroke)
+        start_node = None
+        for n, inc in node_adj.items():
+            if len(inc) == 1:
+                start_node = n
+                break
+        if start_node is None:
+            # cycle: pick arbitrary
+            start_node = lines[lids[0]].start
+
+        used_line: Set[int] = set()
+
+        # walk
+        cur_node = start_node
+        stroke_pts: List[Point] = []
+        prev_node = None
 
         while True:
-            inc_edges = node_to_edges.get(cur_node, [])
-            deg_node = len(inc_edges)
-
-            if deg_node == 0:
+            inc = [lid for lid in node_adj.get(cur_node, []) if lid not in used_line]
+            if len(inc) == 0:
                 break
 
-            # Determine next edge
-            nxt_eid = None
+            # if multiple choices (should be rare after pairing), pick one deterministically
+            lid = inc[0]
+            ln = lines[lid]
 
-            if deg_node == 2:
-                # Continue through a degree-2 node (no branching)
-                e_candidates = [e for e in inc_edges if e != incoming_eid and e not in used]
-                if len(e_candidates) == 0:
-                    break
-                nxt_eid = e_candidates[0]
-
-            elif deg_node >= 3:
-                # Junction: follow pairing if exists
-                key = (cur_node, incoming_eid)
-                if key in pair_map:
-                    cand = pair_map[key]
-                    if cand not in used:
-                        nxt_eid = cand
-                if nxt_eid is None:
-                    break
-
+            # orient line to start from cur_node
+            if ln.start == cur_node:
+                seg = ln.points
+                nxt_node = ln.end
             else:
-                # deg_node == 1 -> endpoint
-                break
+                seg = ln.points[::-1]
+                nxt_node = ln.start
 
-            # Append next segment (avoid duplicating the node point)
-            seg2 = oriented_segment(nxt_eid, cur_node)
-            path_fwd.extend(seg2[1:])
-            used.add(nxt_eid)
+            if len(stroke_pts) == 0:
+                stroke_pts.extend(seg)
+            else:
+                stroke_pts.extend(seg[1:])  # avoid duplicate node point
 
-            incoming_eid = nxt_eid
-            cur_node = seg2[-1]
+            used_line.add(lid)
 
-        polylines.append(path_fwd)
+            prev_node, cur_node = cur_node, nxt_node
 
-    return polylines
+        stroke_polys.append(stroke_pts)
 
+    return stroke_polys
+
+
+# -------------------- Main --------------------
 
 def main():
     parser = argparse.ArgumentParser()
@@ -487,8 +548,8 @@ def main():
 
     # --- Step 2: White top-hat on inverted grayscale ---
     inv = 1.0 - gray
-    TH_H = 50#15
-    TH_W = 50#10
+    TH_H = 50  # 15
+    TH_W = 50  # 10
     selem_tophat = rectangle(TH_H, TH_W)
     tophat = white_tophat(inv, selem_tophat)
 
@@ -508,53 +569,59 @@ def main():
     # --- Step 6: Medial axis skeleton ---
     medial_skel, dist = medial_axis(cleaned, return_distance=True)
 
-    # --- Graph extraction ---
-    deg = degree_map(medial_skel)
-    segments, endpoints, junctions, isolated = extract_segments(medial_skel, deg)
+    # ==========================================================
+    # =============== New path planning method =================
+    # ==========================================================
 
-    # --- Spur pruning (remove attached short branches < 3 pixels) ---
-    segments_pruned = prune_short_spurs(
-        segments=segments,
+    # 1) fast neighbor counting (8-neighbors) with conv + padding
+    cnt = neighbor_count_8(medial_skel)
+
+    # 2) classify skeleton pixels
+    cls = classify_pixels(medial_skel, cnt)
+    isolated = cls["isolated"]
+    endpoints = cls["endpoints"]
+    track = cls["track"]
+    junctions = cls["junctions"]
+
+    print("[INFO] isolated: {}, endpoints: {}, track: {}, junctions(raw): {}".format(
+        len(isolated), len(endpoints), len(track), len(junctions)
+    ))
+
+    # 3) cluster junctions (noise removal) and map to representative
+    junction_list = sorted(list(junctions))
+    J_RADIUS = 20.0  # you said this will be tuned later
+    clusters, jmap = cluster_junctions(junction_list, radius=J_RADIUS)
+
+    # representatives set
+    junction_reps = set(jmap.values())
+
+    print("[INFO] junction clusters: {}, junction reps: {}".format(len(clusters), len(junction_reps)))
+
+    # 4) trace "lines" (endpoint/junction -> track points -> endpoint/junction)
+    lines = trace_lines(
+        skel=medial_skel,
+        cnt=cnt,
         endpoints=endpoints,
         junctions=junctions,
-        spur_len_thresh=3,
+        jmap=jmap,
+    )
+    assert all(0 <= ln.id < len(lines) for ln in lines), "Line.id is not consistent with lines list indices"
+    print("[INFO] lines: {}".format(len(lines)))
+
+    # 5) merge lines into strokes at each junction by angle similarity
+    # (use k=5 pixels direction as you required)
+    dsu, node_to_lines = merge_lines_into_strokes(
+        lines=lines,
+        junction_reps=junction_reps,
+        k_dir=5,
     )
 
-    # Rebuild graph after pruning
-    node_to_edges, edge_to_nodes = build_graph_from_segments(segments_pruned)
-
-    # Recompute "junction set" for graph-level (some junctions may become degree-2 after pruning)
-    graph_junctions = {n for n, es in node_to_edges.items() if len(es) >= 3}
-
-    # --- Junction pairing rule (angle-based, prefer short edges) ---
-    pair_map = build_junction_pairing(
-        segments=segments_pruned,
-        node_to_edges=node_to_edges,
-        edge_to_nodes=edge_to_nodes,
-        junctions=graph_junctions,
-        short_edge_len=30,  # you can tune this: what counts as "short segment"
-    )
-
-    # --- Merge into continuous non-branching polylines ---
-    polylines = build_continuous_polylines(
-        segments=segments_pruned,
-        node_to_edges=node_to_edges,
-        edge_to_nodes=edge_to_nodes,
-        pair_map=pair_map,
-    )
-
-    print("[INFO] Raw segments: {}".format(len(segments)))
-    print("[INFO] Pruned segments: {}".format(len(segments_pruned)))
-    print("[INFO] Continuous polylines: {}".format(len(polylines)))
-    print("[INFO] Endpoints: {}, junctions(before graph): {}, isolated points: {}".format(
-        len(endpoints), len(junctions), len(isolated)
-    ))
-    print("[INFO] Graph junctions (deg>=3): {}".format(len(graph_junctions)))
+    strokes = build_stroke_polylines(lines, dsu)
+    print("[INFO] strokes: {}".format(len(strokes)))
 
     # --- Save key outputs ---
     in_base = os.path.basename(image_path)
     name, ext = os.path.splitext(in_base)
-
     out_dir = os.path.dirname(image_path)
 
     cleaned_u8 = (cleaned.astype(np.uint8) * 255)
@@ -567,9 +634,10 @@ def main():
         dist_u8 = (dist / dist.max() * 255.0).astype(np.uint8)
         imsave(os.path.join(out_dir, f"{name}_dist{ext}"), dist_u8)
 
-    # --- Visualization (2 rows x 3 cols) ---
-    # Keep the original layout, but use the last two panels for graph/paths debugging.
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8), sharex=True, sharey=True)
+    # ==========================================================
+    # ===================== Visualization ======================
+    # ==========================================================
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9), sharex=True, sharey=True)
     ax = axes.ravel()
 
     ax[0].imshow(gray, cmap=plt.cm.gray)
@@ -588,37 +656,44 @@ def main():
     ax[3].axis("off")
     ax[3].set_title("medial axis skeleton", fontsize=12)
 
-    # Panel 4: segments overlay
+    # Panel 4: node classification + junction reps
     ax[4].imshow(medial_skel, cmap=plt.cm.gray)
     ax[4].axis("off")
-    ax[4].set_title("segments (pruned) + nodes", fontsize=12)
+    ax[4].set_title("classified nodes + junction reps", fontsize=12)
 
-    # Plot each segment with a thin line
-    for seg in segments_pruned:
-        rr = np.array([p[0] for p in seg], dtype=np.float32)
-        cc = np.array([p[1] for p in seg], dtype=np.float32)
-        ax[4].plot(cc, rr, linewidth=1.0)
-
-    # Plot endpoints and junctions
+    if len(isolated) > 0:
+        iso = np.array(list(isolated))
+        ax[4].scatter(iso[:, 1], iso[:, 0], s=18, marker="s")
     if len(endpoints) > 0:
         ep = np.array(list(endpoints))
-        ax[4].scatter(ep[:, 1], ep[:, 0], s=10, marker="o")
-    if len(graph_junctions) > 0:
-        jn = np.array(list(graph_junctions))
-        ax[4].scatter(jn[:, 1], jn[:, 0], s=20, marker="x")
+        ax[4].scatter(ep[:, 1], ep[:, 0], s=14, marker="o")
+    if len(junctions) > 0:
+        jn = np.array(list(junctions))
+        ax[4].scatter(jn[:, 1], jn[:, 0], s=10, marker="x")
+    if len(junction_reps) > 0:
+        jr = np.array(list(junction_reps))
+        ax[4].scatter(jr[:, 1], jr[:, 0], s=60, marker="+")  # representative
 
-    # Panel 5: merged polylines
+    # Panel 5: lines + strokes (overlay)
     ax[5].imshow(medial_skel, cmap=plt.cm.gray)
     ax[5].axis("off")
-    ax[5].set_title("merged polylines (no branching)", fontsize=12)
+    ax[5].set_title("lines and strokes (overlay)", fontsize=12)
 
-    for pl in polylines:
-        rr = np.array([p[0] for p in pl], dtype=np.float32)
-        cc = np.array([p[1] for p in pl], dtype=np.float32)
-        ax[5].plot(cc, rr, linewidth=1.2)
-        # mark start/end
-        ax[5].scatter([cc[0]], [rr[0]], s=12)
-        ax[5].scatter([cc[-1]], [rr[-1]], s=12)
+    # draw lines thin
+    for ln in lines:
+        rr = np.array([p[0] for p in ln.points], dtype=np.float32)
+        cc = np.array([p[1] for p in ln.points], dtype=np.float32)
+        ax[5].plot(cc, rr, linewidth=0.8)
+
+    # draw strokes thicker
+    for st in strokes:
+        rr = np.array([p[0] for p in st], dtype=np.float32)
+        cc = np.array([p[1] for p in st], dtype=np.float32)
+        ax[5].plot(cc, rr, linewidth=2.0)
+
+        # mark stroke ends
+        ax[5].scatter([cc[0]], [rr[0]], s=25)
+        ax[5].scatter([cc[-1]], [rr[-1]], s=25)
 
     fig.tight_layout()
     plt.show()
