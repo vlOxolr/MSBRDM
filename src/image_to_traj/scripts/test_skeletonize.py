@@ -335,6 +335,102 @@ def trace_lines(
     return filtered
 
 
+def extract_cycle_lines(
+    skel: np.ndarray,
+    cnt: np.ndarray,
+    used_track: Set[Point],
+    existing_ids_start: int,
+) -> Tuple[List[Line], Set[Point]]:
+    """
+    Extract closed cycles (ring-like skeleton components) where all pixels are track points (cnt==2),
+    hence no endpoints/junctions, and thus ignored by trace_lines().
+
+    Inputs:
+      - skel: medial skeleton (bool)
+      - cnt: 8-neighbor count map
+      - used_track: track pixels already covered by existing lines
+      - existing_ids_start: starting id for new lines
+
+    Returns:
+      - new_lines: List[Line] for cycles, each with start=end at the cycle seed
+      - used_track_updated: updated used_track including cycle pixels
+    """
+    H, W = skel.shape
+    sk = skel.astype(bool)
+
+    # remaining track pixels not covered by any traced line
+    remain = set(map(tuple, np.argwhere(sk & (cnt == 2)).astype(int))) - set(used_track)
+    visited: Set[Point] = set()
+
+    new_lines: List[Line] = []
+    lid = existing_ids_start
+
+    for start in tqdm(list(remain), desc="Extracting cycles", leave=False):
+        if start in visited:
+            continue
+        if start not in remain:
+            continue
+
+        # a cycle pixel should have exactly 2 skeleton neighbors (under ideal conditions)
+        nbs0 = [q for q in neighbors8(start, (H, W)) if sk[q]]
+        if len(nbs0) < 2:
+            # not a clean cycle (or broken), skip
+            visited.add(start)
+            continue
+
+        # pick one neighbor to begin walking
+        prev = start
+        cur = nbs0[0]
+        cycle_pts = [start]
+
+        visited_local: Set[Point] = set([start])
+        closed = False
+
+        # hard safety bound: at most number of skeleton pixels steps
+        max_steps = int(np.count_nonzero(skel)) + 10
+
+        for _ in range(max_steps):
+            cycle_pts.append(cur)
+
+            if cur == start:
+                closed = True
+                break
+
+            if cur in visited_local:
+                # looped somewhere else without returning to start
+                break
+
+            visited_local.add(cur)
+
+            # choose next neighbor != prev
+            nbs = [q for q in neighbors8(cur, (H, W)) if sk[q]]
+            if len(nbs) == 0:
+                break
+            nbs2 = [q for q in nbs if q != prev]
+            if len(nbs2) == 0:
+                break
+
+            # for clean degree-2 cycle, nbs2 should be 1
+            nxt = nbs2[0]
+            prev, cur = cur, nxt
+
+        # validate: must be closed and reasonably long
+        if closed and len(cycle_pts) >= 4:
+            # mark all points (except the last repeated start) as used
+            for p in cycle_pts[:-1]:
+                visited.add(p)
+                used_track.add(p)
+
+            # define a cycle line: start=end at start pixel
+            new_lines.append(Line(lid, cycle_pts, start, start))
+            lid += 1
+        else:
+            # even if not closed, mark visited_local to avoid repeated attempts
+            visited |= visited_local
+
+    return new_lines, used_track
+
+
 def filter_short_junction_lines(
     lines: List[Line],
     junction_reps: Set[Point],
@@ -631,6 +727,34 @@ def main():
         junctions=junctions,
         jmap=jmap,
     )
+
+    print("[INFO] lines (before cycles): {}".format(len(lines)))
+
+    # -------- NEW: extract ring-like cycles (all track points) --------
+    # recompute used_track from current lines (track points only)
+    used_track_from_lines: Set[Point] = set()
+    for ln in lines:
+        for p in ln.points[1:-1]:
+            if cnt[p] == 2:
+                used_track_from_lines.add(p)
+
+    cycle_lines, used_track_from_lines = extract_cycle_lines(
+        skel=medial_skel,
+        cnt=cnt,
+        used_track=used_track_from_lines,
+        existing_ids_start=len(lines),
+    )
+    if len(cycle_lines) > 0:
+        lines.extend(cycle_lines)
+
+    # IMPORTANT: re-index line ids to match list indices (avoid any id/index mismatch)
+    for new_id, ln in enumerate(lines):
+        ln.id = new_id
+
+    print("[INFO] lines (after cycles): {}".format(len(lines)))
+    assert all(0 <= ln.id < len(lines) for ln in lines), "Line.id is not consistent with lines list indices"
+
+
     print("[INFO] lines (before filter): {}".format(len(lines)))
 
     # --- NEW: filter short lines attached to junctions ---
@@ -650,7 +774,6 @@ def main():
         junction_reps=junction_reps,
         k_dir=5,
     )
-
 
     strokes = build_stroke_polylines(lines, dsu)
     print("[INFO] strokes: {}".format(len(strokes)))
