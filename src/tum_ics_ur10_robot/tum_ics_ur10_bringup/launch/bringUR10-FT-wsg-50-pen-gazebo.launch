@@ -1,0 +1,41 @@
+<launch>
+  <!-- ================== Args ================== -->
+  <arg name="gui" default="true"/>
+  <arg name="paused" default="false"/>
+  <arg name="use_sim_time" default="true"/>
+
+  <!-- optional） -->
+  <arg name="prefix" default=""/>
+  <arg name="limited" default="false"/>
+
+  <!-- position of robot -->
+  <arg name="x" default="0.0"/>
+  <arg name="y" default="0.0"/>
+  <arg name="z" default="0.0"/>
+
+  <!--  xacro path-->
+  <arg name="model_xacro"
+       default="$(find tum_ics_ur10_description)/urdf/ur10_robot_ft_wsg_50_pen.urdf.xacro"/>
+
+  <!-- ================== Gazebo ================== -->
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="paused" value="$(arg paused)"/>
+    <arg name="use_sim_time" value="$(arg use_sim_time)"/>
+  </include>
+
+  <!-- ================== Robot Description ================== -->
+  <param name="robot_description"
+         command="$(find xacro)/xacro --inorder $(arg model_xacro) prefix:=$(arg prefix) limited:=$(arg limited)" />
+
+  <!-- publish TF -->
+  <node pkg="robot_state_publisher" type="robot_state_publisher" name="robot_state_publisher" output="screen">
+    <param name="use_sim_time" value="$(arg use_sim_time)"/>
+  </node>
+
+  <!-- ================== Spawn into Gazebo ================== -->
+  <node pkg="gazebo_ros" type="spawn_model" name="spawn_ur10"
+        args="-urdf -param robot_description -model ur10_wsg_cylinder -x $(arg x) -y $(arg y) -z $(arg z)"
+        output="screen" />
+
+</launch>
