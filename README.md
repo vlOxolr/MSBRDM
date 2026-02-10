@@ -31,3 +31,19 @@ export ROS_MASTER_URI=http://localhost:11311
 export ROS_IP=127.0.0.1
 }
 ```
+
+## Guide for merging to develop
+
+```bash
+# last commit
+git add .
+git commit -m "last commit"
+
+# merge
+git switch develop
+git pull
+git merge <your personal branch name>
+git push # not neccessary, but recommended
+git switch <your personal branch name>
+git merge develop
+```
