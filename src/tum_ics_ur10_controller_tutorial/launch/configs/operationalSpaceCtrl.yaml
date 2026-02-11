@@ -21,18 +21,22 @@ operational_space_ctrl:
 
   # ------------------------------------------------------------
   # Task-space (end-effector) control gains
-  # xdot_r = xdot_d - Kp_x*(X - Xd) - Ki_x*∫(X - Xd)
+  # xdot_r(6) = xdot_d(6) - Kp*e(6) - Ki*∫e(6)
+  # e(6) = [position_error(3), orientation_error(3)]
   # ------------------------------------------------------------
   Kp_x: [5.0, 5.0, 4.0]                  # End-effector position feedback (x,y,z)
   Ki_x: [0.9, 0.9, 0.9]                  # Integral term (remove steady-state error)
+  Kp_o: [3.0, 3.0, 3.0]                  # End-effector orientation feedback (rad)
+  Ki_o: [0.0, 0.0, 0.0]                  # Orientation integral gain (rad/s)
   int_x_max: 0.05                        # Integral anti-windup (m)
+  int_o_max: 0.20                        # Orientation integral anti-windup (rad)
 
 
   # ------------------------------------------------------------
   # SAFE preset position (unit: rad)
   # On startup: move to this pose to stay away from singularities and near drawing area
   # ------------------------------------------------------------
-  q_safe: [0.7, 0.7, 1.57079632679, 0.7, 0.7, 0.7]
+  q_safe: [0.0, 0.0, 1.57079632679, 0.0, 0.0, 0.0]
 
 
   # ============================================================
@@ -45,7 +49,7 @@ operational_space_ctrl:
     # ----------------------------------------------------------
     # SAFE phase (joint space)
     # ----------------------------------------------------------
-    start_with_safe: true                # Whether to go to q_safe first
+    start_with_safe: true               # Whether to go to q_safe first
     safe_time: 8.0                       # Minimum SAFE duration (s)
     safe_tol: 0.05                       # Joint error threshold (rad)
 
@@ -87,8 +91,8 @@ operational_space_ctrl:
     #   y(t), z(t) from sinusoid / fitted polynomial
     # ----------------------------------------------------------
     ax: [0.45]                           # Recommended constant only; fixed_x=true overrides this
-    ay: [0.70]                           # y baseline
-    az: [0.60]                           # z baseline
+    ay: [0.2]                           # y baseline
+    az: [0.40]                           # z baseline
 
 
     # ----------------------------------------------------------
@@ -120,8 +124,9 @@ operational_space_ctrl:
   # Saturations (important to prevent speed/torque spikes)
   # ------------------------------------------------------------
   tau_max: 120.0                         # Max joint torque
-  xdot_r_max: 0.15                      # End-effector speed limit (m/s)
-  qdot_r_max: 1.0                       # Joint speed limit (rad/s)
+  xdot_r_max: 0.4                         # End-effector linear speed limit (m/s)
+  wdot_r_max: 0.8                         # End-effector angular speed limit (rad/s)
+  qdot_r_max: 1.6                       # Joint speed limit (rad/s)
 
 
   # ------------------------------------------------------------
