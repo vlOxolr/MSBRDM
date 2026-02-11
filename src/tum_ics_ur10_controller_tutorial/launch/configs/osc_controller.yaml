@@ -1,0 +1,33 @@
+osc_controller:
+
+  # Task-space position PD (x,y,z)
+  gains_pos_p: [200.0, 200.0, 300.0]
+  gains_pos_d: [40.0, 40.0, 60.0]
+
+  # Orientation PD for aligning tool z-axis with board normal
+  gains_ori_p: [20.0, 20.0, 20.0]
+  gains_ori_d: [2.0, 2.0, 2.0]
+
+  # Nullspace posture PD in joint space
+  gains_null_p: [20.0, 20.0, 20.0, 10.0, 10.0, 5.0]
+  gains_null_d: [4.0, 4.0, 4.0, 2.0, 2.0, 1.0]
+
+  # Damping for pseudo-inverse
+  damp_lambda: 0.02
+
+  # Circle trajectory (XY plane, z fixed)
+  circle_radius: 0.2
+  circle_center_x: 0.5
+  circle_center_y: 0.0
+  circle_plane_z: 0.0
+  circle_period: 8.0
+
+  # tool_z_direction: -1 => tool z-axis aligns with -Z (pointing to the board)
+  #                   +1 => tool z-axis aligns with +Z
+  tool_z_direction: -1
+
+  # 
+  ramp_time: 1.5       # soft-start duration [s]
+  max_f_pos: 80.0      # max position force norm
+  max_f_ori: 8.0       # max orientation torque norm
+  max_tau: 120.0       # max per-joint torque abs clamp
