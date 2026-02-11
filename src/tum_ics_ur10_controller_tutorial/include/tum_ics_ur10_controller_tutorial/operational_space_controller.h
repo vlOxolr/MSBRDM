@@ -31,6 +31,7 @@ private:
   using Vector6d = Eigen::Matrix<double, 6, 1>;
   using Matrix6d = Eigen::Matrix<double, 6, 6>;
   using Matrix3d = Eigen::Matrix<double, 3, 3>;
+  using Matrix3x6d = Eigen::Matrix<double, 3, 6>;
 
 private:
   ros::NodeHandle nh_;
@@ -119,6 +120,8 @@ private:
 
   // Damped Least Squares: qdot = J^T (J J^T + λ^2 I)^-1 xdot
   static Vector6d dlsSolve6(const Matrix6d &J, const Vector6d &xdot, double lambda = 0.05);
+  // Position-only DLS: qdot = Jp^T (Jp Jp^T + λ^2 I)^-1 xdot_p
+  static Vector6d dlsSolve3(const Matrix3x6d &Jp, const cc::Vector3 &xdot_p, double lambda = 0.03);
 };
 
 } // namespace RobotControllers

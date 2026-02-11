@@ -470,6 +470,15 @@ OperationalSpaceControl::dlsSolve6(const Matrix6d &J, const Vector6d &xdot, doub
   return qdot;
 }
 
+OperationalSpaceControl::Vector6d
+OperationalSpaceControl::dlsSolve3(const Matrix3x6d &Jp, const cc::Vector3 &xdot_p, double lambda)
+{
+  Matrix3d A = (Jp * Jp.transpose() + (lambda * lambda) * Matrix3d::Identity());
+  cc::Vector3 y = A.inverse() * xdot_p;
+  Vector6d qdot = Jp.transpose() * y;
+  return qdot;
+}
+
 // ===== Operational xdot_r =====
 OperationalSpaceControl::Vector6d OperationalSpaceControl::xdotROperational(double t_sec, const cc::JointPosition &q6, double dt)
 {
@@ -520,6 +529,14 @@ void OperationalSpaceControl::cartesianDesired(double t_sec, cc::Vector3 &Xd, cc
 {
   Rd = R_safe_;
   Wd.setZero();
+
+  if (g_traj.enabled && g_traj.use_move_to_start && g_traj.moving && g_traj.have_start)
+  {
+    // During MOVE, visualization/error should target trajectory start, not safe point.
+    Xd = g_traj.X_start;
+    Xdot_d.setZero();
+    return;
+  }
 
   if (!g_traj.enabled || !g_traj.draw_started || g_traj.t_draw0 < 0.0)
   {
@@ -596,24 +613,15 @@ OperationalSpaceControl::computeQdotR6(double t_sec, const cc::JointPosition &q6
     if (do_debug)
       ROS_INFO_STREAM("[OperationalSpaceControl] phase=MOVE dq_norm=" << dq_norm << " dX_norm=" << dX_norm);
 
-    cc::HomogeneousTransformation Td = cc::HomogeneousTransformation::Identity();
-    Td.pos() = g_traj.X_start;
-    Td.orientation() = R_safe_;
-    const cc::HomogeneousTransformation T = model_.T_ef_0(q6);
-    const cc::CartesianVector e = cc::cartesianErrorWorld(Td, T);
-
-    Matrix6d Kp6 = Matrix6d::Zero();
-    Kp6.topLeftCorner<3, 3>() = Kp_p_;
-    Kp6.bottomRightCorner<3, 3>() = Kp_o_;
-
-    Vector6d xdot_r = Kp6 * e;
+    // MOVE should be position-only; constraining orientation can block convergence.
+    cc::Vector3 dx = g_traj.X_start - X;
+    cc::Vector3 xdot_r = Kp_p_ * dx;
     for (int i = 0; i < 3; ++i)
       xdot_r(i) = std::max(-xdot_r_max_, std::min(xdot_r(i), xdot_r_max_));
-    for (int i = 3; i < 6; ++i)
-      xdot_r(i) = std::max(-wdot_r_max_, std::min(xdot_r(i), wdot_r_max_));
 
     Matrix6d J = jacobian6(q6);
-    Vector6d qdot_r = dlsSolve6(J, xdot_r, 0.05);
+    Matrix3x6d Jp = J.topRows<3>();
+    Vector6d qdot_r = dlsSolve3(Jp, xdot_r, 0.03);
 
     for (int i = 0; i < 6; ++i)
       qdot_r(i) = std::max(-qdot_r_max_, std::min(qdot_r(i), qdot_r_max_));
