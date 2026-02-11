@@ -1,0 +1,133 @@
+## ============================================================
+## Operational Space Controller parameters
+## ============================================================
+operational_space_ctrl:
+
+  # ------------------------------------------------------------
+  # Controller type
+  # 1 = Operational Space PD
+  # 2 = Operational Space PID (recommended, smaller steady-state error)
+  # ------------------------------------------------------------
+  controller_type: 2
+
+
+  # ------------------------------------------------------------
+  # Dynamics control gains
+  # tau = -Kd*(qdot - qdot_r) + M*qddot_r + C*qdot_r + G
+  # ------------------------------------------------------------
+  Kd:   [4.0, 4.0, 3.0, 4.0, 4.0, 3.0]   # Joint damping (anti-oscillation, speed limit)
+  Kp_q: [2.0, 2.0, 1.5, 1.0, 1.0, 1.0]   # SAFE phase: joint return PD gains
+
+
+  # ------------------------------------------------------------
+  # Task-space (end-effector) control gains
+  # xdot_r = xdot_d - Kp_x*(X - Xd) - Ki_x*∫(X - Xd)
+  # ------------------------------------------------------------
+  Kp_x: [5.0, 5.0, 4.0]                  # End-effector position feedback (x,y,z)
+  Ki_x: [0.9, 0.9, 0.9]                  # Integral term (remove steady-state error)
+  int_x_max: 0.05                        # Integral anti-windup (m)
+
+  Kd_x: [4.5, 4.5, 4.0]  # for lamda based OSC
+
+
+
+  # ------------------------------------------------------------
+  # SAFE preset position (unit: rad)
+  # On startup: move to this pose to stay away from singularities and near drawing area
+  # ------------------------------------------------------------
+  q_safe: [0.7, 0.7, 1.57079632679, 0.7, 0.7, 0.7]
+
+
+  # ============================================================
+  # Fitted trajectory parameters (two-stage: SAFE -> MOVE_TO_START -> DRAW)
+  # ============================================================
+  traj:
+    enabled: true                         # Enable end-effector trajectory control
+
+
+    # ----------------------------------------------------------
+    # SAFE phase (joint space)
+    # ----------------------------------------------------------
+    start_with_safe: true                # Whether to go to q_safe first
+    safe_time: 8.0                       # Minimum SAFE duration (s)
+    safe_tol: 0.05                       # Joint error threshold (rad)
+
+
+    # ----------------------------------------------------------
+    # MOVE-TO-START phase (task space)
+    # Move the end-effector from the q_safe pose
+    # to the trajectory start point Xd(t=0)
+    # ----------------------------------------------------------
+    use_move_to_start: true              # Enable move-to-start
+    move_time: 20.0                      # Maximum allowed move time (s)
+    move_tol: 0.02                       # Arrival threshold (m)
+
+
+    # ----------------------------------------------------------
+    # Trajectory timing parameters
+    # ----------------------------------------------------------
+    clamp_time: true                     # Clamp time to [0, T_end]
+    T_end: 20.0                          # Total trajectory duration (s)
+
+
+    # ----------------------------------------------------------
+    # Drawing plane settings
+    # fixed_z = false -> allow z to vary with trajectory
+    # Draw on y-z plane: x fixed
+    # ----------------------------------------------------------
+    fixed_z: false                       # false = do not lock z
+    z_paper: 0.6                         # Only valid when fixed_z=true
+    fixed_x: true                        # true = lock x
+    x_paper: 0.45                        # Fixed x (paper normal)
+
+
+    # ----------------------------------------------------------
+    # Polynomial trajectory (baseline)
+    # x(t) = a0 + a1 t + ... + aN t^N
+    #
+    # For drawing in the y-z plane:
+    #   x fixed (constant term only)
+    #   y(t), z(t) from sinusoid / fitted polynomial
+    # ----------------------------------------------------------
+    ax: [0.45]                           # Recommended constant only; fixed_x=true overrides this
+    ay: [0.70]                           # y baseline
+    az: [0.60]                           # z baseline
+
+
+    # ----------------------------------------------------------
+    # Sinusoid terms (draw circles/curves in y-z plane)
+    # y(t) = y0 + A*cos(w t)
+    # z(t) = z0 + A*sin(w t)
+    # ----------------------------------------------------------
+    use_sin_x: false                     # x not used
+    use_sin_y: true                      # y used
+    use_sin_z: true                      # z used
+
+    sin_x:
+      A: 0.0
+      w: 0.0
+      phi: 0.0
+
+    sin_y:
+      A: 0.06                            # Circle radius (m)
+      w: 0.6                             # Angular velocity (rad/s)
+      phi: 1.57079632679                # Cos phase
+
+    sin_z:
+      A: 0.06                            # Circle radius (m)
+      w: 0.6                             # Angular velocity (rad/s)
+      phi: 0.0                           # Sin phase
+
+
+  # ------------------------------------------------------------
+  # Saturations (important to prevent speed/torque spikes)
+  # ------------------------------------------------------------
+  tau_max: 120.0                         # Max joint torque
+  xdot_r_max: 0.15                      # End-effector speed limit (m/s)
+  qdot_r_max: 1.0                       # Joint speed limit (rad/s)
+
+
+  # ------------------------------------------------------------
+  # UR model parameter namespace
+  # ------------------------------------------------------------
+  model_ns: "ur10_model"
