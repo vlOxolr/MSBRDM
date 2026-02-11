@@ -426,13 +426,18 @@ bool OperationalSpaceControl::inSafePhase(double t_sec, const cc::JointPosition 
   if (!g_traj.enabled || !g_traj.start_with_safe || g_traj.t0 < 0.0)
     return false;
 
-  const double safe_elapsed = t_sec - g_traj.t0;
-  if (g_traj.safe_time > 0.0 && safe_elapsed >= g_traj.safe_time)
+  // Once MOVE/DRAW starts, never re-enter SAFE to avoid phase chattering.
+  if (g_traj.moving || g_traj.draw_started)
     return false;
 
+  const double safe_elapsed = t_sec - g_traj.t0;
+  if (safe_elapsed < g_traj.safe_time)
+    return true;
+
   const Vector6d dq6 = q6 - q_safe6_;
-  return (dq6.norm() > g_traj.safe_tol);
+  return (dq6.head<3>().norm() > g_traj.safe_tol);
 }
+
 
 // ===== FK =====
 cc::Vector3 OperationalSpaceControl::fkPos(const cc::JointPosition &q6) const
@@ -574,6 +579,11 @@ OperationalSpaceControl::computeQdotR6(double t_sec, const cc::JointPosition &q6
   const double dq_norm = (q6 - q_safe6_).norm();
 
   g_traj.computeStartIfNeeded();
+  if (g_traj.have_start)
+{
+  ROS_WARN_STREAM_ONCE("[MOVE DEBUG] X_start (world) = "
+                       << g_traj.X_start.transpose());
+}
 
   // 1) MOVE-TO-START
   if (g_traj.use_move_to_start && !g_traj.draw_started)
@@ -590,6 +600,12 @@ OperationalSpaceControl::computeQdotR6(double t_sec, const cc::JointPosition &q6
 
     const cc::Vector3 X = fkPos(q6);
     const cc::Vector3 dX = X - g_traj.X_start;
+    ROS_WARN_STREAM_THROTTLE(1.0,
+  "[MOVE DEBUG] X_now=" << X.transpose()
+  << "  X_start=" << g_traj.X_start.transpose()
+  << "  dX=" << (X - g_traj.X_start).transpose()
+  << "  dX_norm=" << (X - g_traj.X_start).norm());
+
     const double dX_norm = dX.norm();
 
     const bool reached = (dX_norm <= g_traj.move_tol);
@@ -621,6 +637,11 @@ OperationalSpaceControl::computeQdotR6(double t_sec, const cc::JointPosition &q6
 
     Matrix6d J = jacobian6(q6);
     Matrix3x6d Jp = J.topRows<3>();
+    if (do_debug) {
+      ROS_WARN_STREAM("[MOVE DEBUG] |Jp_row_z|=" << Jp.row(2).norm()
+                      << " |Jp_row_y|=" << Jp.row(1).norm()
+                      << " |Jp_row_x|=" << Jp.row(0).norm());
+    }
     Vector6d qdot_r = dlsSolve3(Jp, xdot_r, 0.03);
 
     for (int i = 0; i < 6; ++i)
@@ -688,6 +709,10 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     g_traj.t_draw0 = -1.0;
 
     const Vector6d e = (q6 - q_safe6_);
+    ROS_WARN_STREAM_THROTTLE(1.0,
+      "[SAFE DEBUG] e(q-q_safe)=" << e.transpose()
+      << "  q=" << q6.transpose()
+      << "  q_safe=" << q_safe6_.transpose());
     // tau_safe = -Kp*(q-q_safe) - Kd*qdot + G
     const cc::VectorDof &G6 = model_.gravityVector(q6);
 
