@@ -646,6 +646,137 @@ def build_stroke_polylines(lines: List[Line], dsu: DSU) -> List[List[Point]]:
     return stroke_polys
 
 
+# -------------------- Smoothing (already added before) --------------------
+
+def smooth_polyline_moving_average(poly: List[Point], window: int = 9, iters: int = 2) -> List[Point]:
+    """
+    Smooth a stroke polyline using moving average on (row, col) coordinates.
+    Endpoints are preserved.
+
+    Tuning notes:
+    - window: odd number recommended (e.g., 5, 7, 9, 11). Larger => smoother but may oversmooth corners.
+    - iters: apply smoothing multiple times for stronger effect.
+    """
+    if len(poly) < 3:
+        return list(poly)
+
+    w = int(window)
+    if w < 3:
+        return list(poly)
+    if w % 2 == 0:
+        w += 1
+
+    arr = np.array(poly, dtype=np.float32)
+    out = arr.copy()
+
+    kernel = np.ones(w, dtype=np.float32) / float(w)
+    pad = w // 2
+
+    for _ in range(int(iters)):
+        r = out[:, 0]
+        c = out[:, 1]
+
+        r_pad = np.pad(r, (pad, pad), mode="edge")
+        c_pad = np.pad(c, (pad, pad), mode="edge")
+
+        r_s = np.convolve(r_pad, kernel, mode="valid")
+        c_s = np.convolve(c_pad, kernel, mode="valid")
+
+        out[:, 0] = r_s
+        out[:, 1] = c_s
+
+        # Preserve endpoints exactly
+        out[0] = arr[0]
+        out[-1] = arr[-1]
+
+    out_int = np.rint(out).astype(np.int32)
+    return [tuple(map(int, p)) for p in out_int]
+
+
+# -------------------- Path planning + polynomial fitting (NEW) --------------------
+
+def pick_key_lefttop(p: Point) -> Tuple[int, int]:
+    """
+    Sorting key for 'top-left to bottom-right'.
+    Prioritize left (col) first, then up (row).
+    """
+    return (p[1], p[0])
+
+
+def order_strokes_by_lefttop_endpoints(strokes: List[List[Point]]) -> List[List[Point]]:
+    """
+    Ordering rule:
+    - Each stroke has two endpoints: first and last point.
+    - Pick the globally most 'top-left' endpoint among all remaining strokes.
+    - Append its stroke to ordered list.
+    - Remove that stroke from future consideration.
+    - Orient the stroke so that the chosen endpoint becomes the first point.
+    """
+    remaining = list(range(len(strokes)))
+    ordered: List[List[Point]] = []
+
+    while len(remaining) > 0:
+        best = None  # (key, stroke_index_in_remaining_list, endpoint_is_start_bool)
+        for ridx, sid in enumerate(remaining):
+            st = strokes[sid]
+            if len(st) == 0:
+                continue
+            p0 = st[0]
+            p1 = st[-1]
+
+            k0 = pick_key_lefttop(p0)
+            k1 = pick_key_lefttop(p1)
+
+            if best is None or k0 < best[0]:
+                best = (k0, ridx, True)
+            if best is None or k1 < best[0]:
+                best = (k1, ridx, False)
+
+        if best is None:
+            break
+
+        _, ridx, is_start = best
+        sid = remaining[ridx]
+        st = strokes[sid]
+
+        if not is_start:
+            st = st[::-1]
+
+        ordered.append(st)
+        remaining.pop(ridx)
+
+    return ordered
+
+
+def fit_stroke_polynomial(stroke: List[Point], deg: int = 5) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Fit x(t) and y(t) with polynomials.
+    - x := col
+    - y := row
+    Returns:
+    - coef_x, coef_y in np.polyfit format (highest power first)
+    - t used for fitting
+    """
+    n = len(stroke)
+    if n < max(3, deg + 1):
+        deg2 = max(1, min(2, n - 1))
+    else:
+        deg2 = deg
+
+    t = np.linspace(0.0, 1.0, n, endpoint=True)
+    y = np.array([p[0] for p in stroke], dtype=np.float32)  # row
+    x = np.array([p[1] for p in stroke], dtype=np.float32)  # col
+
+    coef_x = np.polyfit(t, x, deg2)
+    coef_y = np.polyfit(t, y, deg2)
+    return coef_x, coef_y, t
+
+
+def eval_poly(coef: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Evaluate polynomial given np.polyfit coefficients."""
+    return np.polyval(coef, t)
+
+
 # -------------------- Main --------------------
 
 def main():
@@ -758,7 +889,7 @@ def main():
     print("[INFO] lines (before filter): {}".format(len(lines)))
 
     # --- NEW: filter short lines attached to junctions ---
-    MIN_JUNC_LINE_LEN = 10
+    MIN_JUNC_LINE_LEN = 35
     lines = filter_short_junction_lines(
         lines=lines,
         junction_reps=junction_reps,
@@ -777,6 +908,36 @@ def main():
 
     strokes = build_stroke_polylines(lines, dsu)
     print("[INFO] strokes: {}".format(len(strokes)))
+
+    # --- Smoothing parameters (already added before) ---
+    SMOOTH_WINDOW = 9  # TODO: tune later (odd number recommended)
+    SMOOTH_ITERS = 2   # TODO: tune later
+    strokes_smooth = [smooth_polyline_moving_average(st, window=SMOOTH_WINDOW, iters=SMOOTH_ITERS) for st in strokes]
+    print("[INFO] smoothing: window={}, iters={}".format(SMOOTH_WINDOW, SMOOTH_ITERS))
+
+    # ==========================================================
+    # ===================== Path planning ======================
+    # ==========================================================
+
+    ordered_strokes = order_strokes_by_lefttop_endpoints(strokes_smooth)
+    print("[INFO] ordered_strokes: {}".format(len(ordered_strokes)))
+
+    POLY_DEG = 10  # TODO: tune later
+    poly_list = []  # list of (coef_x, coef_y) or None if failed
+
+    for i, st in enumerate(ordered_strokes):
+        try:
+            coef_x, coef_y, t_fit = fit_stroke_polynomial(st, deg=POLY_DEG)
+            poly_list.append((coef_x, coef_y))
+
+            print("\n[POLY] Stroke {}: n_points={}, deg_x={}, deg_y={}".format(
+                i, len(st), len(coef_x) - 1, len(coef_y) - 1
+            ))
+            print("[POLY] x(t) coefficients (highest->lowest): {}".format(coef_x))
+            print("[POLY] y(t) coefficients (highest->lowest): {}".format(coef_y))
+        except Exception as e:
+            poly_list.append(None)
+            print("\n[POLY] Stroke {}: FIT FAILED, n_points={}, err={}".format(i, len(st), str(e)))
 
     # --- Save key outputs ---
     in_base = os.path.basename(image_path)
@@ -836,7 +997,7 @@ def main():
     # Panel 5: lines + strokes (overlay)
     ax[5].imshow(medial_skel, cmap=plt.cm.gray)
     ax[5].axis("off")
-    ax[5].set_title("lines and strokes (overlay)", fontsize=12)
+    ax[5].set_title("lines and smoothed strokes (overlay)", fontsize=12)
 
     # draw lines thin
     for ln in lines:
@@ -844,8 +1005,8 @@ def main():
         cc = np.array([p[1] for p in ln.points], dtype=np.float32)
         ax[5].plot(cc, rr, linewidth=0.8)
 
-    # draw strokes thicker
-    for st in strokes:
+    # draw smoothed strokes thicker
+    for st in strokes_smooth:
         rr = np.array([p[0] for p in st], dtype=np.float32)
         cc = np.array([p[1] for p in st], dtype=np.float32)
         ax[5].plot(cc, rr, linewidth=2.0)
@@ -855,6 +1016,43 @@ def main():
         ax[5].scatter([cc[-1]], [rr[-1]], s=25)
 
     fig.tight_layout()
+    plt.show()
+
+    # fitting visualization
+    fig2, axes2 = plt.subplots(1, 2, figsize=(14, 6), sharex=True, sharey=True)
+    ax2 = axes2.ravel()
+
+    ax2[0].imshow(medial_skel, cmap=plt.cm.gray)
+    ax2[0].axis("off")
+    ax2[0].set_title("ordered strokes (direction)", fontsize=12)
+
+    for i, st in enumerate(ordered_strokes):
+        rr = np.array([p[0] for p in st], dtype=np.float32)
+        cc = np.array([p[1] for p in st], dtype=np.float32)
+        ax2[0].plot(cc, rr, linewidth=2.0)
+        ax2[0].scatter([cc[0]], [rr[0]], s=30)
+        ax2[0].text(cc[0], rr[0], str(i), fontsize=10)
+
+    ax2[1].imshow(medial_skel, cmap=plt.cm.gray)
+    ax2[1].axis("off")
+    ax2[1].set_title("polynomial fits (x(t), y(t))", fontsize=12)
+
+    for i, st in enumerate(ordered_strokes):
+        if i >= len(poly_list):
+            continue
+        if poly_list[i] is None:
+            continue
+
+        coef_x, coef_y = poly_list[i]
+
+        t_dense = np.linspace(0.0, 1.0, 300, endpoint=True)
+        x_dense = eval_poly(coef_x, t_dense)  # col
+        y_dense = eval_poly(coef_y, t_dense)  # row
+        ax2[1].plot(x_dense, y_dense, linewidth=2.0)
+        ax2[1].scatter([x_dense[0]], [y_dense[0]], s=30)
+        ax2[1].text(x_dense[0], y_dense[0], str(i), fontsize=10)
+
+    fig2.tight_layout()
     plt.show()
 
 
