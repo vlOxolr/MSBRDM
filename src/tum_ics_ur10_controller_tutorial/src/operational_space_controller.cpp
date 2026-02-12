@@ -196,7 +196,9 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     xdot_r_max_(0.25),
     wdot_r_max_(0.80),
     qdot_r_max_(2.0),
-    controller_type_(OP_PID)
+    controller_type_(OP_PID),
+    actual_traj_frame_("world"),
+    actual_traj_ee_link_("ursa_ee_link")
 {
 }
 
@@ -301,6 +303,8 @@ bool OperationalSpaceControl::init()
   ros::param::get(ns + "/xdot_r_max", xdot_r_max_);
   ros::param::get(ns + "/wdot_r_max", wdot_r_max_);
   ros::param::get(ns + "/qdot_r_max", qdot_r_max_);
+  ros::param::param<std::string>(ns + "/actual_traj/frame_id", actual_traj_frame_, "world");
+  ros::param::param<std::string>(ns + "/actual_traj/ee_link", actual_traj_ee_link_, "ursa_ee_link");
 
   int ctrl_type = (int)controller_type_;
   ros::param::get(ns + "/controller_type", ctrl_type);
@@ -341,7 +345,7 @@ bool OperationalSpaceControl::init()
   traj_marker_.color.g = 0.0;
   traj_marker_.color.b = 1.0;
 
-  actual_traj_marker_.header.frame_id = "world";
+  actual_traj_marker_.header.frame_id = actual_traj_frame_;
   actual_traj_marker_.ns = "traj_actual";
   actual_traj_marker_.id = 0;
   actual_traj_marker_.type = visualization_msgs::Marker::LINE_STRIP;
@@ -352,6 +356,9 @@ bool OperationalSpaceControl::init()
   actual_traj_marker_.color.r = 1.0;
   actual_traj_marker_.color.g = 0.0;
   actual_traj_marker_.color.b = 0.0;
+
+  ROS_INFO_STREAM("[OperationalSpaceControl] actual trajectory TF: "
+                  << actual_traj_frame_ << " -> " << actual_traj_ee_link_);
 
   return true;
 }
@@ -377,6 +384,24 @@ bool OperationalSpaceControl::start()
 bool OperationalSpaceControl::stop() { return true; }
 
 void OperationalSpaceControl::resetIntegrators() { int_task_.setZero(); }
+
+bool OperationalSpaceControl::lookupActualEePositionTf(cc::Vector3 &X)
+{
+  try
+  {
+    tf::StampedTransform T_frame_ee;
+    tf_listener_.lookupTransform(actual_traj_frame_, actual_traj_ee_link_, ros::Time(0), T_frame_ee);
+    X << T_frame_ee.getOrigin().x(), T_frame_ee.getOrigin().y(), T_frame_ee.getOrigin().z();
+    return true;
+  }
+  catch (const tf::TransformException &ex)
+  {
+    ROS_WARN_STREAM_THROTTLE(1.0,
+      "[OperationalSpaceControl] TF lookup failed for actual trajectory ("
+      << actual_traj_frame_ << " -> " << actual_traj_ee_link_ << "): " << ex.what());
+    return false;
+  }
+}
 
 void OperationalSpaceControl::publishControlDebug(double t_sec, const std::string &phase, const JointState &state, const Vector6d &tau_cmd)
 {
@@ -792,7 +817,9 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
   }
 
   {
-    cc::Vector3 X = fkPos(q6);
+    cc::Vector3 X;
+    if (!lookupActualEePositionTf(X))
+      X = fkPos(q6);
     geometry_msgs::Point pa;
     pa.x = X(0); pa.y = X(1); pa.z = X(2);
     actual_traj_points_.push_back(pa);

@@ -11,6 +11,7 @@
 #include <geometry_msgs/Point.h>
 #include <std_msgs/Float64MultiArray.h>
 #include <sensor_msgs/JointState.h>
+#include <tf/transform_listener.h>
 
 namespace tum_ics_ur_robot_lli
 {
@@ -83,6 +84,9 @@ private:
   visualization_msgs::Marker actual_traj_marker_;
   std::vector<geometry_msgs::Point> traj_points_;
   std::vector<geometry_msgs::Point> actual_traj_points_;
+  tf::TransformListener tf_listener_;
+  std::string actual_traj_frame_;
+  std::string actual_traj_ee_link_;
 
 public:
   OperationalSpaceControl(double weight = 1.0, const QString &name = "OperationalSpaceCtrl");
@@ -102,6 +106,7 @@ private:
   void publishDeleteAllMarkers();
   void resetMarkerNewSegment();
   void resetIntegrators();
+  bool lookupActualEePositionTf(cc::Vector3 &X);
   void publishControlDebug(double t_sec, const std::string &phase, const JointState &state, const Vector6d &tau_cmd);
 
   // ===== Control core =====

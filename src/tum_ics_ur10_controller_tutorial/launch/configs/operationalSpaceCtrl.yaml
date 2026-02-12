@@ -132,6 +132,13 @@ operational_space_ctrl:
   wdot_r_max: 0.8                         # End-effector angular speed limit (rad/s)
   qdot_r_max: 1.6                       # Joint speed limit (rad/s)
 
+  # ------------------------------------------------------------
+  # Actual trajectory source for RViz red line
+  # ------------------------------------------------------------
+  actual_traj:
+    frame_id: "world"
+    ee_link: "ursa_ee_link"
+
 
   # ------------------------------------------------------------
   # UR model parameter namespace
