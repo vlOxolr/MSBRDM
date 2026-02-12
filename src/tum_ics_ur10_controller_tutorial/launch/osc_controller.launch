@@ -5,6 +5,9 @@
   <!-- ur10 settings -->
   <arg name="CONFIG_FILE_PATH" default="$(find tum_ics_ur10_controller_tutorial)/launch/configs/configUR10.ini"/>
 
+  <!-- ur model parameter -->
+  <rosparam file="$(find ur_model)/launch/configs/ur10_model.yaml" command="load" />
+
   <!-- the controller -->
   <node name="osc_controller" pkg="tum_ics_ur10_controller_tutorial" type="osc_controller_node" args="$(arg CONFIG_FILE_PATH)" output="screen">
 
