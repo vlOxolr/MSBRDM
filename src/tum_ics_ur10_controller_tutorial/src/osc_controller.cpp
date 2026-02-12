@@ -319,15 +319,38 @@ namespace tum_ics_ur_robot_lli
       }
 
       // --- Get current tool pose ---
-      // Use existing model functions (do not re-implement kinematics/jacobian)
-      // T_tool_0 is tool w.r.t. robot base frame (0)
+      // --- Use the same world(B) frame convention as joint_pos_* publishers ---
+      // T_0_B: robot 0 frame w.r.t world(B)
+      cc::HomogeneousTransformation T_0_B = model_.T_0_B();
+
+      // Tool pose in 0 frame
       cc::HomogeneousTransformation T_tool_0 = model_.T_tool_0(state.q);
+
+      // Convert tool pose to world(B) frame
+      cc::HomogeneousTransformation T_tool_B = T_0_B * T_tool_0;
+
+      // Tool Jacobian in 0 frame
       cc::Jacobian J_tool_0_cc = model_.J_tool_0(state.q);
 
-      Matrix6d J = J_tool_0_cc;
+      // Convert Jacobian to world(B) frame:
+      // Linear part must be rotated by R_0_B, angular part also rotated by R_0_B.
+      Matrix6d J_tool_B;
+      J_tool_B.setZero();
+
+      Matrix3d R_0_B;
+      R_0_B << T_0_B(0,0), T_0_B(0,1), T_0_B(0,2),
+              T_0_B(1,0), T_0_B(1,1), T_0_B(1,2),
+              T_0_B(2,0), T_0_B(2,1), T_0_B(2,2);
+
+      J_tool_B.block<3,6>(0,0) = R_0_B * J_tool_0_cc.block<3,6>(0,0);  // linear
+      J_tool_B.block<3,6>(3,0) = R_0_B * J_tool_0_cc.block<3,6>(3,0);  // angular
+
+      // From now on, use world(B) pose and Jacobian:
+      cc::HomogeneousTransformation T_tool = T_tool_B;
+      Matrix6d J = J_tool_B;
 
       Vector3d p;
-      p << T_tool_0(0, 3), T_tool_0(1, 3), T_tool_0(2, 3);
+      p << T_tool(0,3), T_tool(1,3), T_tool(2,3);
 
       if (!have_p_start_)
       {
@@ -336,9 +359,9 @@ namespace tum_ics_ur_robot_lli
       }
 
       Matrix3d R;
-      R << T_tool_0(0, 0), T_tool_0(0, 1), T_tool_0(0, 2),
-           T_tool_0(1, 0), T_tool_0(1, 1), T_tool_0(1, 2),
-           T_tool_0(2, 0), T_tool_0(2, 1), T_tool_0(2, 2);
+      R << T_tool(0,0), T_tool(0,1), T_tool(0,2),
+          T_tool(1,0), T_tool(1,1), T_tool(1,2),
+          T_tool(2,0), T_tool(2,1), T_tool(2,2);
 
       // Current twist xdot = J * qdot
       Vector6d xdot = J * state.qp;
