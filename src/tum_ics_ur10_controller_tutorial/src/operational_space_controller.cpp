@@ -40,6 +40,10 @@ struct FittedTrajConfig
   bool have_start = false;
   cc::Vector3 X_start = cc::Vector3::Zero();
 
+  // ===== NEW: cache MOVE starting EE position (like python C_LINEAR start) =====
+  bool have_move0 = false;
+  cc::Vector3 X_move0 = cc::Vector3::Zero();
+
   std::vector<double> ax{0,0,0,0,0,0};
   std::vector<double> ay{0,0,0,0,0,0};
   std::vector<double> az{0,0,0,0,0,0};
@@ -57,6 +61,10 @@ struct FittedTrajConfig
     moving = false;
     have_start = false;
     X_start.setZero();
+
+    // NEW
+    have_move0 = false;
+    X_move0.setZero();
   }
 
   static double polyN(const std::vector<double> &c, double t)
@@ -536,7 +544,10 @@ OperationalSpaceControl::Vector6d OperationalSpaceControl::xdotROperational(doub
 
   Vector6d xdot_r = xdot_d6 + Kp6 * e;
 
-  if (controller_type_ == OP_PID)
+  // ===== NEW: do NOT integrate during MOVE (recommended) =====
+  const bool is_move_phase = (g_traj.enabled && g_traj.use_move_to_start && g_traj.moving && !g_traj.draw_started);
+
+  if (controller_type_ == OP_PID && !is_move_phase)
   {
     int_task_ += e * dt;
     for (int i = 0; i < 3; ++i)
@@ -560,11 +571,18 @@ void OperationalSpaceControl::cartesianDesired(double t_sec, cc::Vector3 &Xd, cc
   Rd = R_safe_;
   Wd.setZero();
 
-  if (g_traj.enabled && g_traj.use_move_to_start && g_traj.moving && g_traj.have_start)
+  // ===== NEW: during MOVE, generate linear trajectory Xd(t), Xdot_d(t) =====
+  if (g_traj.enabled && g_traj.use_move_to_start && g_traj.moving && g_traj.have_start && g_traj.have_move0)
   {
-    // During MOVE, visualization/error should target trajectory start, not safe point.
-    Xd = g_traj.X_start;
-    Xdot_d.setZero();
+    const double T = std::max(1e-3, g_traj.move_time);
+    const double t_move = std::max(0.0, t_sec - g_traj.t0 - g_traj.safe_time);
+    double s = t_move / T;
+    if (s < 0.0) s = 0.0;
+    if (s > 1.0) s = 1.0;
+
+    Xd = (1.0 - s) * g_traj.X_move0 + s * g_traj.X_start;
+    Xdot_d = (g_traj.X_start - g_traj.X_move0) / T;
+    if (s >= 1.0) Xdot_d.setZero();
     return;
   }
 
@@ -600,17 +618,15 @@ OperationalSpaceControl::computeQdotR6(double t_sec, const cc::JointPosition &q6
     return Vector6d::Zero();
   }
 
-  // For logging
   const double dq_norm = (q6 - q_safe6_).norm();
 
   g_traj.computeStartIfNeeded();
   if (g_traj.have_start)
-{
-  ROS_WARN_STREAM_ONCE("[MOVE DEBUG] X_start (world) = "
-                       << g_traj.X_start.transpose());
-}
+  {
+    ROS_WARN_STREAM_ONCE("[MOVE DEBUG] X_start (world) = " << g_traj.X_start.transpose());
+  }
 
-  // 1) MOVE-TO-START
+  // 1) MOVE-TO-START (linear trajectory like python C_LINEAR)
   if (g_traj.use_move_to_start && !g_traj.draw_started)
   {
     if (!g_traj.moving)
@@ -619,24 +635,33 @@ OperationalSpaceControl::computeQdotR6(double t_sec, const cc::JointPosition &q6
       resetIntegrators();
       resetMarkerNewSegment();
       qdot_r_prev_valid_ = false; // avoid qddot spike
+
+      // NEW: capture MOVE starting EE position
+      g_traj.X_move0 = fkPos(q6);
+      g_traj.have_move0 = true;
+
+      ROS_WARN_STREAM("[MOVE DEBUG] X_move0 (world) = " << g_traj.X_move0.transpose());
     }
 
     const double elapsed = t_sec - g_traj.t0;
 
     const cc::Vector3 X = fkPos(q6);
-    const cc::Vector3 dX = X - g_traj.X_start;
+    const cc::Vector3 dX_to_goal = X - g_traj.X_start;
     ROS_WARN_STREAM_THROTTLE(1.0,
-  "[MOVE DEBUG] X_now=" << X.transpose()
-  << "  X_start=" << g_traj.X_start.transpose()
-  << "  dX=" << (X - g_traj.X_start).transpose()
-  << "  dX_norm=" << (X - g_traj.X_start).norm());
+      "[MOVE DEBUG] X_now=" << X.transpose()
+      << "  X_start=" << g_traj.X_start.transpose()
+      << "  dX=" << dX_to_goal.transpose()
+      << "  dX_norm=" << dX_to_goal.norm());
 
-    const double dX_norm = dX.norm();
+    const bool reached = (dX_to_goal.norm() <= g_traj.move_tol);
 
-    const bool reached = (dX_norm <= g_traj.move_tol);
+    // use move local time (after safe_time) for "time done"
+    const double t_move = std::max(0.0, t_sec - g_traj.t0 - g_traj.safe_time);
+    const bool time_done = (t_move >= g_traj.move_time);
+
     const bool timeout = (elapsed >= (g_traj.safe_time + g_traj.move_time + 0.5));
 
-    if (reached || timeout)
+    if ((time_done && reached) || timeout)
     {
       g_traj.moving = false;
       g_traj.draw_started = true;
@@ -646,19 +671,20 @@ OperationalSpaceControl::computeQdotR6(double t_sec, const cc::JointPosition &q6
       qdot_r_prev_valid_ = false; // avoid qddot spike
 
       if (do_debug)
-        ROS_INFO_STREAM("[OperationalSpaceControl] phase=MOVE->DRAW dq_norm=" << dq_norm << " dX_norm=" << dX_norm);
+        ROS_INFO_STREAM("[OperationalSpaceControl] phase=MOVE->DRAW dq_norm=" << dq_norm
+                        << " dX_norm=" << dX_to_goal.norm());
 
       return Vector6d::Zero();
     }
 
     if (do_debug)
-      ROS_INFO_STREAM("[OperationalSpaceControl] phase=MOVE dq_norm=" << dq_norm << " dX_norm=" << dX_norm);
+      ROS_INFO_STREAM("[OperationalSpaceControl] phase=MOVE dq_norm=" << dq_norm
+                      << " dX_norm=" << dX_to_goal.norm());
 
-    // MOVE should be position-only; constraining orientation can block convergence.
-    cc::Vector3 dx = g_traj.X_start - X;
-    cc::Vector3 xdot_r = Kp_p_ * dx;
-    for (int i = 0; i < 3; ++i)
-      xdot_r(i) = std::max(-xdot_r_max_, std::min(xdot_r(i), xdot_r_max_));
+    // NEW: use the same "desired" generator + operational structure, but take position only
+    // cartesianDesired() now provides linear Xd(t), Xdot_d(t) during MOVE
+    Vector6d xdot_r6 = xdotROperational(t_sec, q6, dt);
+    cc::Vector3 xdot_r = xdot_r6.head<3>(); // position-only
 
     Matrix6d J = jacobian6(q6);
     Matrix3x6d Jp = J.topRows<3>();
@@ -667,6 +693,7 @@ OperationalSpaceControl::computeQdotR6(double t_sec, const cc::JointPosition &q6
                       << " |Jp_row_y|=" << Jp.row(1).norm()
                       << " |Jp_row_x|=" << Jp.row(0).norm());
     }
+
     Vector6d qdot_r = dlsSolve3(Jp, xdot_r, 0.03);
 
     for (int i = 0; i < 6; ++i)
@@ -685,7 +712,6 @@ OperationalSpaceControl::computeQdotR6(double t_sec, const cc::JointPosition &q6
     qdot_r_prev_valid_ = false; // avoid qddot spike
   }
 
-  // log dX_norm w.r.t start
   if (do_debug)
   {
     const cc::Vector3 X = fkPos(q6);
@@ -728,7 +754,6 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
   // ===== SAFE torque PD (6-DoF), criterion uses head<3>() =====
   if (inSafePhase(t_sec, q6))
   {
-    // reset phase flags so we don't “half-start” move/draw
     g_traj.moving = false;
     g_traj.draw_started = false;
     g_traj.t_draw0 = -1.0;
@@ -738,7 +763,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
       "[SAFE DEBUG] e(q-q_safe)=" << e.transpose()
       << "  q=" << q6.transpose()
       << "  q_safe=" << q_safe6_.transpose());
-    // tau_safe = -Kp*(q-q_safe) - Kd*qdot + G
+
     const cc::VectorDof &G6 = model_.gravityVector(q6);
 
     Vector6d tau_safe = (-Kp_q6_ * e) + (-Kd6_ * qP6) + G6;
@@ -750,7 +775,6 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
                                    << (q6 - q_safe6_).norm()
                                    << " dX_norm=nan");
 
-    // avoid qddot spike when leaving SAFE
     qdot_r_prev_valid_ = false;
     publishControlDebug(t_sec, "SAFE", state, tau_safe);
     return tau_safe;
@@ -819,7 +843,9 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
   {
     cc::Vector3 X;
     if (!lookupActualEePositionTf(X))
-      X = fkPos(q6);
+       X = fkPos(q6);
+    //cc::Vector3 X = fkPos(q6);
+
     geometry_msgs::Point pa;
     pa.x = X(0); pa.y = X(1); pa.z = X(2);
     actual_traj_points_.push_back(pa);
