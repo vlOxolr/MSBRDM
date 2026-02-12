@@ -18,7 +18,7 @@ operational_space_ctrl:
   #Kd:   [80.0, 80.0, 80.0, 4.0, 4.0, 3.0]   # Joint damping (anti-oscillation, speed limit)
   #Kp_q: [2.0, 2.0, 1.5, 1.0, 1.0, 1.0]   # SAFE phase: joint return PD gains
   Kd:   [6.0, 6.0, 5.0, 4.0, 4.0, 3.0]
-  Kp_q: [25.0, 25.0, 15.0, 8.0, 6.0, 4.0]
+  Kp_q: [25.0, 25.0, 15.0, 15.0, 15.0, 4.0]
 
 
   # ------------------------------------------------------------
@@ -53,7 +53,7 @@ operational_space_ctrl:
     # SAFE phase (joint space)
     # ----------------------------------------------------------
     start_with_safe: true               # Whether to go to q_safe first
-    safe_time: 8.0                       # Minimum SAFE duration (s)
+    safe_time: 10.0              # Keep controller in SAFE for state debugging
     #safe_tol: 0.05                       # Joint error threshold (rad)
     safe_tol: 0.4                       # Joint error threshold (rad)
 
@@ -63,9 +63,10 @@ operational_space_ctrl:
     # Move the end-effector from the q_safe pose
     # to the trajectory start point Xd(t=0)
     # ----------------------------------------------------------
-    use_move_to_start: true              # Enable move-to-start
+    use_move_to_start: false             # Disable MOVE while debugging SAFE
     move_time: 20.0                     # Maximum allowed move time (s)
     move_tol: 0.02                       # Arrival threshold (m)
+    hold_safe_only: false                 # true = always stay in SAFE phase
 
 
     # ----------------------------------------------------------

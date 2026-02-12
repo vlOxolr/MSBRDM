@@ -27,6 +27,7 @@ struct FittedTrajConfig
   bool use_move_to_start = true;
   double move_time = 20.0;
   double move_tol = 0.01;
+  bool hold_safe_only = false;
 
   bool clamp_time = true;
   double T_end = 10.0;
@@ -100,6 +101,7 @@ struct FittedTrajConfig
     ros::param::get(ns + "/traj/use_move_to_start", use_move_to_start);
     ros::param::get(ns + "/traj/move_time", move_time);
     ros::param::get(ns + "/traj/move_tol", move_tol);
+    ros::param::get(ns + "/traj/hold_safe_only", hold_safe_only);
 
     ros::param::get(ns + "/traj/clamp_time", clamp_time);
     ros::param::get(ns + "/traj/T_end", T_end);
@@ -456,19 +458,46 @@ void OperationalSpaceControl::publishControlDebug(double t_sec, const std::strin
 // ===== SAFE phase check =====
 bool OperationalSpaceControl::inSafePhase(double t_sec, const cc::JointPosition &q6) const
 {
-  if (!g_traj.enabled || !g_traj.start_with_safe || g_traj.t0 < 0.0)
+  // Treat tiny negative startup timestamps as valid; only reject the reset sentinel (-1).
+  const bool gate_ok = (g_traj.enabled && g_traj.start_with_safe && g_traj.t0 > -0.5);
+  const bool phase_locked_out = (g_traj.moving || g_traj.draw_started);
+  const double safe_elapsed = t_sec - g_traj.t0;
+  const Vector6d dq6 = q6 - q_safe6_;
+  const double dq_head3_norm = dq6.head<3>().norm();
+  const double dq6_norm = dq6.norm();
+  const bool within_safe_time = gate_ok && (safe_elapsed < g_traj.safe_time);
+  const bool joint_not_reached = gate_ok && (dq6_norm > g_traj.safe_tol);
+
+  ROS_INFO_STREAM_THROTTLE(1.0,
+    "[SAFE CHECK] enabled=" << (g_traj.enabled ? 1 : 0)
+    << " start_with_safe=" << (g_traj.start_with_safe ? 1 : 0)
+    << " t0=" << g_traj.t0
+    << " moving=" << (g_traj.moving ? 1 : 0)
+    << " draw_started=" << (g_traj.draw_started ? 1 : 0)
+    << " safe_elapsed=" << safe_elapsed
+    << " safe_time=" << g_traj.safe_time
+    << " dq_head3_norm=" << dq_head3_norm
+    << " dq6_norm=" << dq6_norm
+    << " safe_tol=" << g_traj.safe_tol
+    << " gate_ok=" << (gate_ok ? 1 : 0)
+    << " within_safe_time=" << (within_safe_time ? 1 : 0)
+    << " joint_not_reached=" << (joint_not_reached ? 1 : 0));
+
+  if (!gate_ok)
     return false;
+
+  // Debug mode: force controller to stay in SAFE phase.
+  if (g_traj.hold_safe_only)
+    return true;
 
   // Once MOVE/DRAW starts, never re-enter SAFE to avoid phase chattering.
-  if (g_traj.moving || g_traj.draw_started)
+  if (phase_locked_out)
     return false;
 
-  const double safe_elapsed = t_sec - g_traj.t0;
   if (safe_elapsed < g_traj.safe_time)
     return true;
 
-  const Vector6d dq6 = q6 - q_safe6_;
-  return (dq6.head<3>().norm() > g_traj.safe_tol);
+  return (dq6_norm > g_traj.safe_tol);
 }
 
 
@@ -768,12 +797,21 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
 
     Vector6d tau_safe = (-Kp_q6_ * e) + (-Kd6_ * qP6) + G6;
 
+    int sat_count = 0;
+    double tau_abs_max = 0.0;
     for (int i = 0; i < 6; ++i)
+    {
+      tau_abs_max = std::max(tau_abs_max, std::abs(tau_safe(i)));
+      if (std::abs(tau_safe(i)) >= tau_max_)
+        sat_count++;
       tau_safe(i) = std::max(-tau_max_, std::min(tau_safe(i), tau_max_));
+    }
 
     ROS_INFO_STREAM_THROTTLE(1.0, "[OperationalSpaceControl] phase=SAFE dq_norm="
                                    << (q6 - q_safe6_).norm()
-                                   << " dX_norm=nan");
+                                   << " dX_norm=nan"
+                                   << " tau_abs_max=" << tau_abs_max
+                                   << " sat_count=" << sat_count);
 
     qdot_r_prev_valid_ = false;
     publishControlDebug(t_sec, "SAFE", state, tau_safe);
