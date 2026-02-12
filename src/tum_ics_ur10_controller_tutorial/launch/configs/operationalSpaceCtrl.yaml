@@ -15,27 +15,31 @@ operational_space_ctrl:
   # Dynamics control gains
   # tau = -Kd*(qdot - qdot_r) + M*qddot_r + C*qdot_r + G
   # ------------------------------------------------------------
-  Kd:   [4.0, 4.0, 3.0, 4.0, 4.0, 3.0]   # Joint damping (anti-oscillation, speed limit)
-  Kp_q: [2.0, 2.0, 1.5, 1.0, 1.0, 1.0]   # SAFE phase: joint return PD gains
+  #Kd:   [80.0, 80.0, 80.0, 4.0, 4.0, 3.0]   # Joint damping (anti-oscillation, speed limit)
+  #Kp_q: [2.0, 2.0, 1.5, 1.0, 1.0, 1.0]   # SAFE phase: joint return PD gains
+  Kd:   [6.0, 6.0, 5.0, 4.0, 4.0, 3.0]
+  Kp_q: [25.0, 25.0, 15.0, 15.0, 15.0, 4.0]
 
 
   # ------------------------------------------------------------
   # Task-space (end-effector) control gains
-  # xdot_r = xdot_d - Kp_x*(X - Xd) - Ki_x*∫(X - Xd)
+  # xdot_r(6) = xdot_d(6) - Kp*e(6) - Ki*∫e(6)
+  # e(6) = [position_error(3), orientation_error(3)]
   # ------------------------------------------------------------
-  Kp_x: [5.0, 5.0, 4.0]                  # End-effector position feedback (x,y,z)
+  Kp_x: [80.0, 600.0, 600.0]                 # End-effector position feedback (x,y,z)
   Ki_x: [0.9, 0.9, 0.9]                  # Integral term (remove steady-state error)
+  Kp_o: [3.0, 3.0, 3.0]                  # End-effector orientation feedback (rad)
+  Ki_o: [0.0, 0.0, 0.0]                  # Orientation integral gain (rad/s)
   int_x_max: 0.05                        # Integral anti-windup (m)
-
-  Kd_x: [4.5, 4.5, 4.0]  # for lamda based OSC
-
+  int_o_max: 0.20                        # Orientation integral anti-windup (rad)
 
 
   # ------------------------------------------------------------
   # SAFE preset position (unit: rad)
   # On startup: move to this pose to stay away from singularities and near drawing area
   # ------------------------------------------------------------
-  q_safe: [0.7, 0.7, 1.57079632679, 0.7, 0.7, 0.7]
+  q_safe: [0.0, -1.537, 0.0004, -0.662, 0.801, 0.0]
+
 
 
   # ============================================================
@@ -48,9 +52,10 @@ operational_space_ctrl:
     # ----------------------------------------------------------
     # SAFE phase (joint space)
     # ----------------------------------------------------------
-    start_with_safe: true                # Whether to go to q_safe first
-    safe_time: 8.0                       # Minimum SAFE duration (s)
-    safe_tol: 0.05                       # Joint error threshold (rad)
+    start_with_safe: true               # Whether to go to q_safe first
+    safe_time: 10.0              # Keep controller in SAFE for state debugging
+    #safe_tol: 0.05                       # Joint error threshold (rad)
+    safe_tol: 0.4                       # Joint error threshold (rad)
 
 
     # ----------------------------------------------------------
@@ -58,16 +63,17 @@ operational_space_ctrl:
     # Move the end-effector from the q_safe pose
     # to the trajectory start point Xd(t=0)
     # ----------------------------------------------------------
-    use_move_to_start: true              # Enable move-to-start
-    move_time: 20.0                      # Maximum allowed move time (s)
+    use_move_to_start: false             # Disable MOVE while debugging SAFE
+    move_time: 20.0                     # Maximum allowed move time (s)
     move_tol: 0.02                       # Arrival threshold (m)
+    hold_safe_only: false                 # true = always stay in SAFE phase
 
 
     # ----------------------------------------------------------
     # Trajectory timing parameters
     # ----------------------------------------------------------
     clamp_time: true                     # Clamp time to [0, T_end]
-    T_end: 20.0                          # Total trajectory duration (s)
+    T_end: 60.0                          # Total trajectory duration (s)
 
 
     # ----------------------------------------------------------
@@ -78,7 +84,7 @@ operational_space_ctrl:
     fixed_z: false                       # false = do not lock z
     z_paper: 0.6                         # Only valid when fixed_z=true
     fixed_x: true                        # true = lock x
-    x_paper: 0.45                        # Fixed x (paper normal)
+    x_paper: 0.35                        # Fixed x (paper normal)
 
 
     # ----------------------------------------------------------
@@ -89,9 +95,9 @@ operational_space_ctrl:
     #   x fixed (constant term only)
     #   y(t), z(t) from sinusoid / fitted polynomial
     # ----------------------------------------------------------
-    ax: [0.45]                           # Recommended constant only; fixed_x=true overrides this
-    ay: [0.70]                           # y baseline
-    az: [0.60]                           # z baseline
+    ax: [1.45]                           # Recommended constant only; fixed_x=true overrides this
+    ay: [0.25]                           # y baseline
+    az: [0.6]                           # z baseline
 
 
     # ----------------------------------------------------------
@@ -109,12 +115,12 @@ operational_space_ctrl:
       phi: 0.0
 
     sin_y:
-      A: 0.06                            # Circle radius (m)
+      A: 0.07                           # Circle radius (m)
       w: 0.6                             # Angular velocity (rad/s)
       phi: 1.57079632679                # Cos phase
 
     sin_z:
-      A: 0.06                            # Circle radius (m)
+      A: 0.07                            # Circle radius (m)
       w: 0.6                             # Angular velocity (rad/s)
       phi: 0.0                           # Sin phase
 
@@ -123,8 +129,16 @@ operational_space_ctrl:
   # Saturations (important to prevent speed/torque spikes)
   # ------------------------------------------------------------
   tau_max: 120.0                         # Max joint torque
-  xdot_r_max: 0.15                      # End-effector speed limit (m/s)
-  qdot_r_max: 1.0                       # Joint speed limit (rad/s)
+  xdot_r_max: 0.1                         # End-effector linear speed limit (m/s)
+  wdot_r_max: 0.8                         # End-effector angular speed limit (rad/s)
+  qdot_r_max: 1.6                       # Joint speed limit (rad/s)
+
+  # ------------------------------------------------------------
+  # Actual trajectory source for RViz red line
+  # ------------------------------------------------------------
+  actual_traj:
+    frame_id: "world"
+    ee_link: "ursa_ee_link"
 
 
   # ------------------------------------------------------------

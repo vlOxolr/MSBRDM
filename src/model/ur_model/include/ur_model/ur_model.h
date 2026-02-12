@@ -51,24 +51,24 @@ namespace ur
   private:
     /* members */
 
-    // dynamic model
+    // Dynamic model caches (updated on demand)
     cc::MatrixDof M_;
     cc::MatrixDof C_;
     cc::VectorDof g_;
 
-    // robot regressor
+    // Robot regressor and parameter vector for identification
     Parameters theta_;
     Regressor Yr_;
 
     /* parameters */
 
-    // link length
+    // Link lengths (DH or model-specific parameters)
     cc::Scalar L1, L2, L3, L4, L5, L6, L7, L8, L9, L10, L11, L12;
 
-    // link mass
+    // Link masses
     cc::Scalar m1, m2, m3, m4, m5, m6;
 
-    // inertia tensors
+    // Inertia tensor components (link frames)
     cc::Scalar I111, I112, I113, I122, I123, I133;
     cc::Scalar I211, I212, I213, I222, I223, I233;
     cc::Scalar I311, I312, I313, I322, I323, I333;
@@ -76,29 +76,29 @@ namespace ur
     cc::Scalar I511, I512, I513, I522, I523, I533;
     cc::Scalar I611, I612, I613, I622, I623, I633;
 
-    // gravity components
+    // Gravity components in base/world (depending on convention)
     cc::Scalar gx, gy, gz;
 
-    // joint limits
+    // Joint limits (lower/upper for each joint)
     cc::Scalar lo_jl1, lo_jl2, lo_jl3, lo_jl4, lo_jl5, lo_jl6;
     cc::Scalar hi_jl1, hi_jl2, hi_jl3, hi_jl4, hi_jl5, hi_jl6;
 
-    // gravity vectors
+    // Gravity vectors in different frames
     cc::LinearPosition g_b_, g_0_;
 
-    // base to world transformation
+    // Base <-> world transformations
     cc::HomogeneousTransformation T_0_b_;
     cc::HomogeneousTransformation T_b_0_;
 
-    // tool to ef transformation
+    // Tool-to-EEF fixed transform
     cc::HomogeneousTransformation T_tool_ef_;
 
-    // frames
+    // Frame names used in TF
     std::string robot_0_frame_; // 0 frame tf name
     std::string base_frame_;    // base frame tf name
     std::string tool_frame_;    // tool frame tf name
 
-    // broadcast frames
+    // TF broadcaster and cached transforms
     tf::TransformBroadcaster br_;
     std::vector<tf::StampedTransform> tf_stamped_transform_; // stack of tf transformations
 
@@ -116,43 +116,43 @@ namespace ur
     virtual ~URModel();
 
     /** 
-    * @brief inertia matrix computation
+    * @brief Inertia matrix computation M(q)
     *
-    * @param inertia Matrix
-    * @param joint position
+    * @param q Joint position
+    * @return Reference to internal cache M_
     */
     const cc::MatrixDof &inertiaMatrix(const cc::JointPosition &q);
 
     /** 
-    * @brief coriolis centripetal matrix computation
+    * @brief Coriolis/centripetal matrix computation C(q, qdot)
     *
-    * @param coriolis centripetal matrix
-    * @param joint position
-    * @param joint velocity
+    * @param q Joint position
+    * @param qP Joint velocity
+    * @return Reference to internal cache C_
     */
     const cc::MatrixDof &centripetalMatrix(const cc::JointPosition &q, const cc::JointVelocity &qP);
 
     /** 
-    * @brief gravitational vector computation
+    * @brief Gravity vector computation g(q)
     *
-    * @param gravitational vector
-    * @param joint position
+    * @param q Joint position
+    * @return Reference to internal cache g_
     */
     const cc::VectorDof &gravityVector(const cc::JointPosition &q);
 
     /** 
-    * @brief regressor matrix computation
+    * @brief Regressor matrix computation Y(q, qdot, qr_dot, qr_ddot)
     *
-    * @param regressor matrix
-    * @param joint position
-    * @param joint velocity
-    * @param reference joint velocity
-    * @param reference joint acceleration
+    * @param q Joint position
+    * @param qP Joint velocity
+    * @param qrP Reference joint velocity
+    * @param qrPP Reference joint acceleration
+    * @return Reference to internal cache Yr_
     */
     const Regressor &regressor(const cc::JointPosition &q, const cc::JointVelocity &qP, const cc::JointVelocity &qrP, const cc::JointAcceleration &qrPP);
 
     /**
-     * @brief inital guess based on loaded parameters
+    * @brief inital guess based on loaded parameters
      * Call this to initalize parameter vector theta
      * 
      * @return const Parameters& 
@@ -160,155 +160,153 @@ namespace ur
     const Parameters &parameterInitalGuess();
 
     /** 
-    * @brief robot base wrt fixed base
+    * @brief Robot base frame w.r.t fixed/world base
     */
     cc::HomogeneousTransformation T_0_B() const;
 
     /** 
-    * @brief fixed base wrt to robot base
+    * @brief Fixed/world base w.r.t robot base frame
     */
     cc::HomogeneousTransformation T_B_0() const;
 
-    /**
-     * @brief Tool wrt ef
-     */
+    /** 
+    * @brief Tool frame w.r.t end-effector frame
+    */
     cc::HomogeneousTransformation T_Tool_Ef() const;
 
     /** 
-    * @brief gravity vector wrt word
+    * @brief Gravity vector in world/base frame
     */
     cc::LinearPosition g_B() const;
 
     /** 
-    * @brief gravity vector wrt base
+    * @brief Gravity vector in robot base frame
     */
     cc::LinearPosition g_0() const;
 
     /** 
-    * @brief endeffector transformation matrix
+    * @brief End-effector transform w.r.t robot base (0 frame)
     */
     cc::HomogeneousTransformation T_ef_0(const cc::JointPosition &q) const;
 
     /** 
-    * @brief endeffector transformation matrix wrt to robot base frame
+    * @brief End-effector transform w.r.t fixed/world base
     */
     cc::HomogeneousTransformation T_ef_B(const cc::JointPosition &q) const;
 
     /** 
-    * @brief tool transformation matrix
+    * @brief Tool transform w.r.t robot base (0 frame)
     */
     cc::HomogeneousTransformation T_tool_0(const cc::JointPosition &q) const;
 
     /** 
-    * @brief endeffector transformation matrix wrt to robot base frame
+    * @brief Tool transform w.r.t fixed/world base
     */
     cc::HomogeneousTransformation T_tool_B(const cc::JointPosition &q) const;
 
     /** 
-    * @brief transformation matrix j-th joint wrt to robot base frame
-    * 
+    * @brief j-th joint transform w.r.t robot base
+    *
     * Joint index j in range: 0-5
     */
     cc::HomogeneousTransformation T_j_0(const cc::JointPosition &q, int j) const;
 
     /** 
-    * @brief transformation matrix j-th center of mass frame wrt to robot base frame
-    * 
+    * @brief j-th link COM transform w.r.t robot base
+    *
     * Joint index j in range: 0-5
     */
     cc::HomogeneousTransformation T_cm_j_0(const cc::JointPosition &q, int j) const;
 
     /** 
-    * @brief endeffector jacobian matrix wrt to robot base frame
+    * @brief End-effector Jacobian w.r.t robot base
     */
     cc::Jacobian J_ef_0(const cc::JointPosition &q) const;
 
     /** 
-    * @brief endeffector jacobian matrix wrt to robot base frame
+    * @brief Tool Jacobian w.r.t robot base
     */
     cc::Jacobian J_tool_0(const cc::JointPosition &q) const;
 
     /** 
-    * @brief jacobian matrix at j-th joint wrt to robot base frame
-    * 
+    * @brief Jacobian at j-th joint w.r.t robot base
+    *
     * Joint index j in range: 0-5
     */
     cc::Jacobian J_j_0(const cc::JointPosition &q, int j) const;
 
     /** 
-    * @brief jacobian matrix at j-th joint offseted by length tj wrt 0 frame 
-    * 
+    * @brief Jacobian at j-th joint offset by tj w.r.t 0 frame
+    *
     * Joint index j in range: 0-5
     */
     cc::Jacobian Jt_j_0(const cc::LinearPosition &tj, const cc::JointPosition &q, int j) const;
 
     /** 
-    * @brief jacobian matrix at j-th center of mass wrt to robot base frame
-    * 
+    * @brief Jacobian at j-th link COM w.r.t robot base
+    *
     * Joint index j in range: 0-5
     */
     cc::Jacobian Jcm_j_0(const cc::JointPosition &q, int j) const;
 
     /** 
-    * @brief jacobian matrix at j-th center of mass offseted by length tj wrt robot base frame
-    * 
+    * @brief Jacobian at j-th COM offset by tj w.r.t robot base
+    *
     * Joint index j in range: 0-5
     */
     cc::Jacobian Jtcm_j_0(const cc::LinearPosition &tj, const cc::JointPosition &q, int j) const;
 
     /** 
-    * @brief endeffector jacobian derivative wrt robot base frame 
+    * @brief End-effector Jacobian time derivative w.r.t robot base
     */
     cc::Jacobian Jp_ef_0(const cc::JointPosition &q, const cc::JointVelocity &qP) const;
 
     /** 
-    * @brief tool jacobian derivative wrt robot base frame 
+    * @brief Tool Jacobian time derivative w.r.t robot base
     */
     cc::Jacobian Jp_tool_0(const cc::JointPosition &q, const cc::JointVelocity &qP) const;
 
     /** 
-    * @brief jacobian derivative at j-th joint wrt robot base frame 
-    * 
+    * @brief Jacobian time derivative at j-th joint w.r.t robot base
+    *
     * Joint index j in range: 0-5
     */
     cc::Jacobian Jp_j_0(const cc::JointPosition &q, const cc::JointVelocity &qP, int j) const;
 
     /** 
-    * @brief jacobian derivative at j-th joint offseted by length tj wrt robot base frame 
-    * 
+    * @brief Jacobian time derivative at j-th joint offset by tj w.r.t robot base
+    *
     * Joint index j in range: 0-5
     */
     cc::Jacobian Jtp_j_0(const cc::LinearPosition &tj, const cc::JointPosition &q, const cc::JointVelocity &qP, int j) const;
 
     /** 
-    * @brief jacobian derivative at j-th center of mass wrt robot base frame 
-    * 
+    * @brief Jacobian time derivative at j-th COM w.r.t robot base
+    *
     * Joint index j in range: 0-5
     */
     cc::Jacobian Jpcm_j_0(const cc::JointPosition &q, const cc::JointVelocity &qP, int j) const;
 
     /** 
-    * @brief jacobian derivative at j-th center of mass offseted by length tj wrt robot base frame 
-    * 
+    * @brief Jacobian time derivative at j-th COM offset by tj w.r.t robot base
+    *
     * Joint index j in range: 0-5
     */
     cc::Jacobian Jtpcm_j_0(const cc::LinearPosition &tj, const cc::JointPosition &q, const cc::JointVelocity &qP, int j) const;
 
-    /**
-     * @brief return lower joint limits of j-th joint
-     * 
-     */
+    /** 
+    * @brief Return lower joint limit of j-th joint
+    */
     cc::Scalar lowerJointLimits_j(int j) const;
 
-    /**
-     * @brief return upper joint limits of j-th joint
-     * 
-     */
+    /** 
+    * @brief Return upper joint limit of j-th joint
+    */
     cc::Scalar upperJointLimits_j(int j) const;
 
     /** 
-    * @brief inverse kinematics, return all posible 8 ik solutions
-    * 
+    * @brief Inverse kinematics, returns all 8 possible IK solutions
+    *
     * @note Simon: I think there is a bug here! Need to check ...
     */
     void inverseKinematics(IKSolutions &Qs, const cc::HomogeneousTransformation &Tef, cc::Scalar q6_d) const;
@@ -334,13 +332,13 @@ namespace ur
     std::string getDHFrame_j(int j) const;
 
     /**
-     * @brief broad cast frames in tf tree
+     * @brief Broadcast frames in TF tree
      */
     void broadcastFrames(const cc::JointPosition &q, const ros::Time &time);
 
   protected:
     /**
-     * @brief initalize the model
+     * @brief Initialize the model (loads parameters from ROS)
      */
     virtual bool init(ros::NodeHandle &nh);
 

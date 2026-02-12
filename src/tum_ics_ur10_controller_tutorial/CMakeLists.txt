@@ -7,13 +7,17 @@ SET(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
+  control_core
   tum_ics_ur_robot_msgs
   tum_ics_ur_robot_lli
+  ur_model
   roscpp
+  geometry_msgs
   sensor_msgs
   std_msgs
   tf
   tf_conversions
+  visualization_msgs
 )
 
 ##############################################################################
@@ -53,7 +57,7 @@ set(CMAKE_CXX_FLAGS "${Qt5Widgets_EXECUTABLE_COMPILE_FLAGS}")
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES my_robot_control_lli
-  CATKIN_DEPENDS tum_ics_ur_robot_msgs roscpp rospy sensor_msgs std_msgs tf tf_conversions visualization_msgs tum_ics_ur_robot_lli
+  CATKIN_DEPENDS control_core ur_model tum_ics_ur_robot_msgs roscpp rospy sensor_msgs std_msgs tf tf_conversions visualization_msgs tum_ics_ur_robot_lli
   DEPENDS ${DEPENDS_VAR}
 )
 
@@ -80,6 +84,7 @@ file(GLOB_RECURSE MY_CTRL_INC RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} FOLLOW_SYMLIN
 
 add_library(my_robot_control_lli
    src/simple_effort_controller.cpp
+   src/operational_space_controller.cpp
    ${MY_CTRL_INC}
 )
 target_link_libraries(my_robot_control_lli
@@ -104,6 +109,7 @@ add_dependencies(my_robot_control_lli
 
 set(APP_TARGETS
   simple_effort_controller_node
+  operational_space_controller_node
 )
 
 foreach(target ${APP_TARGETS})
