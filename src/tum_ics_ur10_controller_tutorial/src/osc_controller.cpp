@@ -11,6 +11,11 @@ namespace tum_ics_ur_robot_lli
     OscController::OscController(double weight, const QString &name) :
       ControlEffort(name, SPLINE_TYPE, JOINT_SPACE, weight),
       is_first_iter_(true),
+      ee_path_computed_(),
+      ee_path_desired_(),
+      path_decim_(1),
+      path_count_(0),
+      path_max_len_(5000),
       Kp_pos_(Matrix3d::Zero()),
       Kd_pos_(Matrix3d::Zero()),
       Kp_ori_(Matrix3d::Zero()),
@@ -34,6 +39,14 @@ namespace tum_ics_ur_robot_lli
       tau_cmd_(Vector6d::Zero())
     {
       control_data_pub_ = nh_.advertise<tum_ics_ur_robot_msgs::ControlData>("osc_controller_data", 1);
+
+      // Debug publishers (Path)
+      ee_path_computed_pub_ = nh_.advertise<nav_msgs::Path>("osc_controller/ee_path_computed", 1);
+      ee_path_desired_pub_ = nh_.advertise<nav_msgs::Path>("osc_controller/ee_path_desired", 1);
+
+      // Debug publishers (PointStamped)
+      ee_pos_computed_pub_ = nh_.advertise<geometry_msgs::PointStamped>("osc_controller/ee_pos_computed", 1);
+      ee_pos_desired_pub_ = nh_.advertise<geometry_msgs::PointStamped>("osc_controller/ee_pos_desired", 1);
     }
 
     OscController::~OscController()
@@ -167,6 +180,12 @@ namespace tum_ics_ur_robot_lli
       if (max_f_ori_ <= 0.0) max_f_ori_ = 8.0;
       if (max_tau_ <= 0.0) max_tau_ = 120.0;
 
+      // --- Path debug params (optional) ---
+      ros::param::get(ns + "/path_decim", path_decim_);
+      ros::param::get(ns + "/path_max_len", path_max_len_);
+      if (path_decim_ < 1) path_decim_ = 1;
+      if (path_max_len_ < 10) path_max_len_ = 10;
+
       ROS_WARN_STREAM("Kp_pos:\n" << Kp_pos_);
       ROS_WARN_STREAM("Kd_pos:\n" << Kd_pos_);
       ROS_WARN_STREAM("Kp_ori:\n" << Kp_ori_);
@@ -182,6 +201,7 @@ namespace tum_ics_ur_robot_lli
                                    << ", max_f_pos=" << max_f_pos_
                                    << ", max_f_ori=" << max_f_ori_
                                    << ", max_tau=" << max_tau_);
+      ROS_WARN_STREAM("path_decim=" << path_decim_ << ", path_max_len=" << path_max_len_);
 
       return true;
     }
@@ -191,6 +211,14 @@ namespace tum_ics_ur_robot_lli
       ROS_WARN_STREAM("OscController::start");
       is_first_iter_ = true;
       have_p_start_ = false;
+
+      // Reset debug paths
+      ee_path_computed_.poses.clear();
+      ee_path_desired_.poses.clear();
+      ee_path_computed_.header.frame_id = "world";
+      ee_path_desired_.header.frame_id = "world";
+      path_count_ = 0;
+
       return true;
     }
 
@@ -342,6 +370,84 @@ namespace tum_ics_ur_robot_lli
           vd = s * vd_c + sdot * dp;
           ad = Vector3d::Zero(); // keep it simple and safe in ramp phase
         }
+      }
+
+      // --- Publish debug trajectories (PointStamped) ---
+      // NOTE: These are computed inside controller (not from external topics)
+      {
+        ros::Time stamp = ros::Time::now();
+
+        geometry_msgs::PointStamped msg_p;
+        msg_p.header.stamp = stamp;
+        msg_p.header.frame_id = "world";
+        msg_p.point.x = p(0);
+        msg_p.point.y = p(1);
+        msg_p.point.z = p(2);
+        ee_pos_computed_pub_.publish(msg_p);
+
+        geometry_msgs::PointStamped msg_pd;
+        msg_pd.header.stamp = stamp;
+        msg_pd.header.frame_id = "world";
+        msg_pd.point.x = pd(0);
+        msg_pd.point.y = pd(1);
+        msg_pd.point.z = pd(2);
+        ee_pos_desired_pub_.publish(msg_pd);
+      }
+
+      // --- Publish debug trajectories as Path ---
+      path_count_++;
+      if ((path_count_ % path_decim_) == 0)
+      {
+        ros::Time stamp = ros::Time::now();
+
+        geometry_msgs::PoseStamped pose_p;
+        pose_p.header.stamp = stamp;
+        pose_p.header.frame_id = "world";
+        pose_p.pose.position.x = p(0);
+        pose_p.pose.position.y = p(1);
+        pose_p.pose.position.z = p(2);
+        pose_p.pose.orientation.w = 1.0;
+        pose_p.pose.orientation.x = 0.0;
+        pose_p.pose.orientation.y = 0.0;
+        pose_p.pose.orientation.z = 0.0;
+
+        geometry_msgs::PoseStamped pose_pd;
+        pose_pd.header.stamp = stamp;
+        pose_pd.header.frame_id = "world";
+        pose_pd.pose.position.x = pd(0);
+        pose_pd.pose.position.y = pd(1);
+        pose_pd.pose.position.z = pd(2);
+        pose_pd.pose.orientation.w = 1.0;
+        pose_pd.pose.orientation.x = 0.0;
+        pose_pd.pose.orientation.y = 0.0;
+        pose_pd.pose.orientation.z = 0.0;
+
+        ee_path_computed_.header.stamp = stamp;
+        ee_path_desired_.header.stamp = stamp;
+
+        // Force valid frame_id each publish (avoid empty frame issues)
+        ee_path_computed_.header.frame_id = "world";
+        ee_path_desired_.header.frame_id = "world";
+
+        ee_path_computed_.poses.push_back(pose_p);
+        ee_path_desired_.poses.push_back(pose_pd);
+
+        // Keep path bounded
+        if ((int)ee_path_computed_.poses.size() > path_max_len_)
+        {
+          int extra = (int)ee_path_computed_.poses.size() - path_max_len_;
+          ee_path_computed_.poses.erase(ee_path_computed_.poses.begin(),
+                                        ee_path_computed_.poses.begin() + extra);
+        }
+        if ((int)ee_path_desired_.poses.size() > path_max_len_)
+        {
+          int extra = (int)ee_path_desired_.poses.size() - path_max_len_;
+          ee_path_desired_.poses.erase(ee_path_desired_.poses.begin(),
+                                       ee_path_desired_.poses.begin() + extra);
+        }
+
+        ee_path_computed_pub_.publish(ee_path_computed_);
+        ee_path_desired_pub_.publish(ee_path_desired_);
       }
 
       // --- Position task (impedance in task space) ---

@@ -9,6 +9,11 @@
 // Debug message (same style as the example controller)
 #include <tum_ics_ur_robot_msgs/ControlData.h>
 
+// Debug topics (Path + PointStamped)
+#include <nav_msgs/Path.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/PointStamped.h>
+
 namespace tum_ics_ur_robot_lli
 {
   namespace RobotControllers
@@ -21,6 +26,21 @@ namespace tum_ics_ur_robot_lli
 
       ros::NodeHandle nh_;
       ros::Publisher control_data_pub_;
+
+      // Debug publishers (Path)
+      ros::Publisher ee_path_computed_pub_;
+      ros::Publisher ee_path_desired_pub_;
+
+      // Debug publishers (PointStamped)
+      ros::Publisher ee_pos_computed_pub_;
+      ros::Publisher ee_pos_desired_pub_;
+
+      // Debug path buffers
+      nav_msgs::Path ee_path_computed_;
+      nav_msgs::Path ee_path_desired_;
+      int path_decim_;
+      int path_count_;
+      int path_max_len_;
 
       // Task-space gains
       Matrix3d Kp_pos_;
