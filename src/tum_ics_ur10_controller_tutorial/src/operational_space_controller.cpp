@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <Eigen/SVD>
 
 namespace tum_ics_ur_robot_lli
 {
@@ -276,23 +277,32 @@ void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPositi
 // Desired trajectory (DRAW)
 // -------------------------
 void OperationalSpaceControl::cartesianDesired(
-  double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d, cc::Rotation3 &Rd, cc::Vector3 &Wd)
+  double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d,
+  cc::Rotation3 &Rd, cc::Vector3 &Wd)
 {
-  // DRAW: fixed x,z at start; y increases by draw_length_ over draw_time_
   const double t = std::max(0.0, t_sec - t_draw0_);
-  double s = t / std::max(1e-3, draw_time_);
-  if (s > 1.0) s = 1.0;
+
+  double T = draw_time_;
+  double R = draw_length_;   // 用 length 当半径
+
+  double omega = 2.0 * M_PI / std::max(1e-3, T);
 
   Xd = X_start_;
-  Xd(1) = X_start_(1) + draw_length_ * s;
 
+  // ===== XY 平面圆 =====
+  Xd(0) = X_start_(0) + R * std::cos(omega * t);
+  Xd(1) = X_start_(1) + R * std::sin(omega * t);
+  Xd(2) = X_start_(2);
+
+  // 速度
   Xdot_d.setZero();
-  if (s < 1.0)
-    Xdot_d(1) = draw_length_ / std::max(1e-3, draw_time_);
+  Xdot_d(0) = -R * omega * std::sin(omega * t);
+  Xdot_d(1) =  R * omega * std::cos(omega * t);
 
   Rd = R_draw_;
   Wd.setZero();
 }
+
 
 // -------------------------
 // Model helpers (FK/J)
@@ -393,6 +403,31 @@ OperationalSpaceControl::computeQdotR_DRAW(double t_sec, const cc::JointPosition
 
   // joint ref velocity
   const Matrix6d J6 = jacobian6(q6);
+  // ================= DEBUG: Jacobian condition =================
+  Eigen::JacobiSVD<Matrix6d> svd(J6);
+  Eigen::VectorXd S = svd.singularValues();
+
+  double sigma_max = S(0);
+  double sigma_min = S(S.size()-1);
+  double condJ = sigma_max / std::max(sigma_min, 1e-12);
+
+  double e_pos_norm = e.head<3>().norm();
+  double e_ori_norm = e.tail<3>().norm();
+
+  double xdot_pos_norm = xdot_r6.head<3>().norm();
+  double wdot_norm     = xdot_r6.tail<3>().norm();
+
+  ROS_INFO_STREAM_THROTTLE(1.0,
+    "[DRAW DEBUG] "
+    << "condJ=" << condJ
+    << " sigma_min=" << sigma_min
+    << " e_pos=" << e_pos_norm
+    << " e_ori=" << e_ori_norm
+    << " |xdot_p|=" << xdot_pos_norm
+    << " |wdot|=" << wdot_norm
+  );
+  // =============================================================
+
   Vector6d qdot_r = dlsSolve6(J6, xdot_r6, 0.05);
 
   for (int i = 0; i < 6; ++i)
@@ -507,6 +542,11 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
 
     // qdot_r from task ref (pos + ori lock)
     const Vector6d qdot_r = computeQdotR_DRAW(t_sec, q6);
+
+    ROS_INFO_STREAM_THROTTLE(1.0,
+      "[DRAW DEBUG] |qdot_r|=" << qdot_r.norm()
+      << " |qdot|=" << qP6.norm());
+
 
     // qddot_r by numeric diff
     Vector6d qddot_r = Vector6d::Zero();
