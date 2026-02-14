@@ -11,7 +11,6 @@
 #include <geometry_msgs/Point.h>
 #include <std_msgs/Float64MultiArray.h>
 #include <sensor_msgs/JointState.h>
-#include <tf/transform_listener.h>
 
 namespace tum_ics_ur_robot_lli
 {
@@ -34,46 +33,70 @@ private:
   using Matrix3d = Eigen::Matrix<double, 3, 3>;
   using Matrix3x6d = Eigen::Matrix<double, 3, 6>;
 
+  enum Phase
+  {
+    PHASE_SAFE = 0,
+    PHASE_DRAW = 1
+  };
+
 private:
   ros::NodeHandle nh_;
   ur::URModel model_;
   bool model_ready_;
 
-  // Gains
-  Matrix6d Kd6_;    // damping on Sq (6x6 diag)
-  Matrix3d Kp_p_;   // cartesian position feedback (3x3 diag)
-  Matrix3d Ki_p_;   // cartesian position integral gain (3x3 diag)
-  Matrix3d Kp_o_;   // cartesian orientation feedback (3x3 diag)
-  Matrix3d Ki_o_;   // cartesian orientation integral gain (3x3 diag)
-  Matrix6d Kp_q6_;  // joint ref gain (6x6 diag) (used for SAFE torque PD)
+  // ===== YAML switches =====
+  bool enable_safe_;
+  bool enable_draw_;
 
-  // Task-space integral term (anti-windup)
-  Vector6d int_task_;
-  double int_p_max_;
-  double int_o_max_;
-
-  // Safe pose in joint/task space
+  // ===== SAFE =====
+  Matrix6d Kp_q6_;      // joint gain (diag) used to build qrP in SAFE
+  Matrix6d Kd_safe6_;   // damping in SAFE (diag)
   Vector6d q_safe6_;
-  cc::Rotation3 R_safe_;
+  double safe_tol_;
 
-  // Differentiate qdot_r (6-DoF)
+  // ===== DRAW =====
+  Matrix3d Kp_p_;       // position feedback (diag)
+  Matrix3d Kp_o_;       // orientation feedback (diag) (DRAW only)
+  Matrix6d Kd6_;        // damping on sliding variable in DRAW (diag)
+  double draw_time_;    // fixed 20s
+  double draw_length_;  // 0.5m along +Y
+
+  // draw timing & start pose
+  bool draw_initialized_;
+  double t_draw0_;
+  cc::Vector3 X_start_;     // fixed x,z and y start
+  cc::Rotation3 R_draw_;    // desired orientation in DRAW (tool z -> +X)
+
+  // ===== Adaptive =====
+  bool adaptive_enabled_;
+  double adapt_gamma_;
+  double adapt_sigma_;
+  double theta_hat_max_;
+  ur::URModel::Parameters theta_hat_;
+  bool theta_hat_initialized_;
+
+  // Differentiate qdot_r
   Vector6d qdot_r_prev6_;
   bool qdot_r_prev_valid_;
   double prev_time_sec_;
 
+  // State machine
+  Phase phase_;
+  bool safe_done_;
+  double t0_;
+
+  // (kept for compatibility with your existing codebase)
   JointState q_init_;
   JointState q_home_;
   JointState q_park_;
 
   // Saturations
   double tau_max_;
+  double qdot_r_max_;
   double xdot_r_max_;
   double wdot_r_max_;
-  double qdot_r_max_;
 
-  ControllerType controller_type_;
-
-  // RViz visualization
+  // RViz visualization (kept; you can remove later)
   ros::Publisher traj_pub_;
   ros::Publisher actual_traj_pub_;
   ros::Publisher task_error_pub_;
@@ -84,9 +107,6 @@ private:
   visualization_msgs::Marker actual_traj_marker_;
   std::vector<geometry_msgs::Point> traj_points_;
   std::vector<geometry_msgs::Point> actual_traj_points_;
-  tf::TransformListener tf_listener_;
-  std::string actual_traj_frame_;
-  std::string actual_traj_ee_link_;
 
 public:
   OperationalSpaceControl(double weight = 1.0, const QString &name = "OperationalSpaceCtrl");
@@ -105,27 +125,23 @@ private:
   // RViz marker helpers
   void publishDeleteAllMarkers();
   void resetMarkerNewSegment();
-  void resetIntegrators();
-  bool lookupActualEePositionTf(cc::Vector3 &X);
   void publishControlDebug(double t_sec, const std::string &phase, const JointState &state, const Vector6d &tau_cmd);
 
-  // ===== Control core =====
-  Vector6d computeQdotR6(double t_sec, const cc::JointPosition &q6, double dt);
+  // ===== phase helpers =====
+  bool inSafePhase(const cc::JointPosition &q6) const;
+  void ensureDrawInit(double t_sec, const cc::JointPosition &q6);
 
-  Vector6d xdotROperational(double t_sec, const cc::JointPosition &q6, double dt);
+  // ===== reference generators =====
   void cartesianDesired(double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d, cc::Rotation3 &Rd, cc::Vector3 &Wd);
-  bool inSafePhase(double t_sec, const cc::JointPosition &q6) const;
+  Vector6d computeQdotR_DRAW(double t_sec, const cc::JointPosition &q6);
 
-  // Model interfaces
+  // ===== model helpers =====
   cc::Vector3 fkPos(const cc::JointPosition &q6) const;
   cc::Rotation3 fkOri(const cc::JointPosition &q6) const;
-
-  // 6x6 geometric Jacobian
   Matrix6d jacobian6(const cc::JointPosition &q6) const;
 
-  // Damped Least Squares: qdot = J^T (J J^T + λ^2 I)^-1 xdot
+  // Damped Least Squares
   static Vector6d dlsSolve6(const Matrix6d &J, const Vector6d &xdot, double lambda = 0.05);
-  // Position-only DLS: qdot = Jp^T (Jp Jp^T + λ^2 I)^-1 xdot_p
   static Vector6d dlsSolve3(const Matrix3x6d &Jp, const cc::Vector3 &xdot_p, double lambda = 0.03);
 };
 
