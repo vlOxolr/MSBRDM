@@ -65,6 +65,10 @@ private:
   double draw_time_;    // fixed 20s
   double draw_length_;  // 0.5m along +Y
 
+  // ===== trajectory loop control =====
+  int traj_loop_count_;       // current loop index
+  int traj_loop_max_;         // maximum loop count
+
   // move timing & start pose
   bool move_initialized_;
   double t_move0_;

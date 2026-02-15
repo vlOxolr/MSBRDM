@@ -52,7 +52,9 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     tau_max_(120.0),
     qdot_r_max_(2.0),
     xdot_r_max_(0.25),
-    wdot_r_max_(0.80)
+    wdot_r_max_(0.80),
+    traj_loop_count_(0),
+    traj_loop_max_(3)
 {
 }
 
@@ -322,7 +324,7 @@ void OperationalSpaceControl::cartesianDesiredMove(
   const double t = std::max(0.0, t_sec - t_move0_);
 
   const double T = std::max(1e-3, move_time_);
-  const double L = move_length_;   // 直线总长度
+  const double L = move_length_ - 0.05 * traj_loop_count_;
 
   // 归一化时间 0~1
   double s = t / T;
@@ -358,7 +360,7 @@ void OperationalSpaceControl::cartesianDesiredDraw(
   const double t = std::max(0.0, t_sec - t_draw0_);
 
   double T = draw_time_;
-  double R = draw_length_;   // 用 length 当半径
+  double R = draw_length_ - 0.05 * traj_loop_count_;
 
   double omega = 2.0 * M_PI / std::max(1e-3, T);
 
@@ -556,7 +558,17 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     if (e_norm <= safe_tol_)
     {
       safe_done_ = true;
-      if (enable_move_) phase_ = PHASE_MOVE;
+      if (traj_loop_count_ < traj_loop_max_)
+      {
+        ROS_WARN_STREAM("[SAFE] start next loop, loop=" << traj_loop_count_);
+
+        phase_ = PHASE_MOVE;
+      }
+      else
+      {
+        ROS_WARN_STREAM("[SAFE] all loops finished.");
+        return Vector6d::Zero();   
+      }
       move_initialized_ = false;
       qdot_r_prev_valid_ = false; // avoid qddot spike on transition
       resetMarkerNewSegment();
@@ -734,13 +746,11 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     double t_draw = t_sec - t_draw0_;
     if (t_draw >= draw_time_)
     {
-      ROS_WARN_STREAM("[PHASE SWITCH] DRAW -> SAFE");
-
+      ROS_WARN_STREAM("[PHASE SWITCH] DRAW finished one loop");
+      traj_loop_count_++;
       phase_ = PHASE_SAFE;
-      qdot_r_prev_valid_ = false;   // 避免 qddot_r 突变
+      qdot_r_prev_valid_ = false;
       resetMarkerNewSegment();
-
-
     }
 
 
