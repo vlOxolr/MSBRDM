@@ -102,9 +102,13 @@ private:
   ros::Publisher task_error_pub_;
   ros::Publisher effort_debug_pub_;
   ros::Publisher effort_joint_state_pub_;
+  ros::Publisher desired_point_pub_;   // 预计轨迹点球体
+  ros::Publisher actual_point_pub_;    // 实际末端位置球体
 
   visualization_msgs::Marker traj_marker_;
   visualization_msgs::Marker actual_traj_marker_;
+  visualization_msgs::Marker desired_point_marker_;   // 预计轨迹点球体
+  visualization_msgs::Marker actual_point_marker_;    // 实际末端位置球体
   std::vector<geometry_msgs::Point> traj_points_;
   std::vector<geometry_msgs::Point> actual_traj_points_;
 

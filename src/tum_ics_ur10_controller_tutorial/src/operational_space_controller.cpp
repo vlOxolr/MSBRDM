@@ -186,6 +186,8 @@ bool OperationalSpaceControl::init()
   // (optional) publishers for debug/rviz
   traj_pub_ = nh_.advertise<visualization_msgs::Marker>("/ur10/desired_trajectory", 1);
   actual_traj_pub_ = nh_.advertise<visualization_msgs::Marker>("/ur10/actual_trajectory", 1);
+  desired_point_pub_ = nh_.advertise<visualization_msgs::Marker>("/ur10/desired_point", 1);
+  actual_point_pub_ = nh_.advertise<visualization_msgs::Marker>("/ur10/actual_point", 1);
   task_error_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/ur10/task_space_error", 1);
   effort_debug_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/ur10/joint_effort_debug", 1);
   effort_joint_state_pub_ = nh_.advertise<sensor_msgs::JointState>("/ur10/joint_effort_state", 1);
@@ -215,6 +217,36 @@ bool OperationalSpaceControl::init()
   actual_traj_marker_.color.r = 1.0;
   actual_traj_marker_.color.g = 0.0;
   actual_traj_marker_.color.b = 0.0;
+
+  // 预计轨迹点球体 (蓝色)
+  desired_point_marker_.header.frame_id = "world";
+  desired_point_marker_.ns = "desired_point";
+  desired_point_marker_.id = 0;
+  desired_point_marker_.type = visualization_msgs::Marker::SPHERE;
+  desired_point_marker_.action = visualization_msgs::Marker::ADD;
+  desired_point_marker_.scale.x = 0.03;  // 球体直径
+  desired_point_marker_.scale.y = 0.03;
+  desired_point_marker_.scale.z = 0.03;
+  desired_point_marker_.color.a = 0.8;   // 半透明
+  desired_point_marker_.color.r = 0.0;
+  desired_point_marker_.color.g = 0.0;
+  desired_point_marker_.color.b = 1.0;   // 蓝色
+  desired_point_marker_.pose.orientation.w = 1.0;
+
+  // 实际末端位置球体 (绿色)
+  actual_point_marker_.header.frame_id = "world";
+  actual_point_marker_.ns = "actual_point";
+  actual_point_marker_.id = 0;
+  actual_point_marker_.type = visualization_msgs::Marker::SPHERE;
+  actual_point_marker_.action = visualization_msgs::Marker::ADD;
+  actual_point_marker_.scale.x = 0.03;
+  actual_point_marker_.scale.y = 0.03;
+  actual_point_marker_.scale.z = 0.03;
+  actual_point_marker_.color.a = 0.8;
+  actual_point_marker_.color.r = 1.0;
+  actual_point_marker_.color.g = 0.0;   // red
+  actual_point_marker_.color.b = 0.0;
+  actual_point_marker_.pose.orientation.w = 1.0;
 
   ROS_INFO_STREAM("[OperationalSpaceControl] init ok"
                   << " enable_safe=" << (enable_safe_ ? 1 : 0)
@@ -579,6 +611,20 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
         actual_traj_marker_.header.stamp = ros::Time::now();
         actual_traj_pub_.publish(actual_traj_marker_);
       }
+
+      // 发布当前预计轨迹点球体 (蓝色)
+      desired_point_marker_.header.stamp = ros::Time::now();
+      desired_point_marker_.pose.position.x = Xd(0);
+      desired_point_marker_.pose.position.y = Xd(1);
+      desired_point_marker_.pose.position.z = Xd(2);
+      desired_point_pub_.publish(desired_point_marker_);
+
+      // 发布当前实际末端位置球体 (绿色)
+      actual_point_marker_.header.stamp = ros::Time::now();
+      actual_point_marker_.pose.position.x = X(0);
+      actual_point_marker_.pose.position.y = X(1);
+      actual_point_marker_.pose.position.z = X(2);
+      actual_point_pub_.publish(actual_point_marker_);
     }
 
     return tau;
@@ -600,6 +646,8 @@ void OperationalSpaceControl::publishDeleteAllMarkers()
     clear.header.stamp = ros::Time::now();
     traj_pub_.publish(clear);
     actual_traj_pub_.publish(clear);
+    desired_point_pub_.publish(clear);
+    actual_point_pub_.publish(clear);
     ros::Duration(0.03).sleep();
   }
 }
