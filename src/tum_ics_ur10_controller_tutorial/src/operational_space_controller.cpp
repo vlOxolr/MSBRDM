@@ -69,7 +69,7 @@ bool OperationalSpaceControl::init()
 
   // switches
   ros::param::get(ns + "/enable_safe", enable_safe_);
-  ros::param::get(ns + "/enable_move", enable_safe_);
+  ros::param::get(ns + "/enable_move", enable_move_);
   ros::param::get(ns + "/enable_draw", enable_draw_);
 
   // safe
@@ -557,6 +557,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     {
       safe_done_ = true;
       if (enable_move_) phase_ = PHASE_MOVE;
+      move_initialized_ = false;
       qdot_r_prev_valid_ = false; // avoid qddot spike on transition
       resetMarkerNewSegment();
     }
@@ -629,6 +630,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
       ROS_WARN_STREAM("[PHASE SWITCH] MOVE -> DRAW");
 
       phase_ = PHASE_DRAW;
+      draw_initialized_ = false;
       qdot_r_prev_valid_ = false;   // 避免 qddot_r 突变
       resetMarkerNewSegment();
       return Vector6d::Zero();      // 当前周期先不输出旧控制
@@ -727,6 +729,19 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     if (!enable_draw_) return tau;
 
     ensureDrawInit(t_sec, q6);
+
+    // ===== DRAW 完成判定 =====
+    double t_draw = t_sec - t_draw0_;
+    if (t_draw >= draw_time_)
+    {
+      ROS_WARN_STREAM("[PHASE SWITCH] DRAW -> SAFE");
+
+      phase_ = PHASE_SAFE;
+      qdot_r_prev_valid_ = false;   // 避免 qddot_r 突变
+      resetMarkerNewSegment();
+
+
+    }
 
 
     // qdot_r from task ref (pos + ori lock)
