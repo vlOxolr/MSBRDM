@@ -17,6 +17,7 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     model_("ur10_model"),
     model_ready_(false),
     enable_safe_(true),
+    enable_move_(true),
     enable_draw_(true),
     Kp_q6_(Matrix6d::Zero()),
     Kd_safe6_(Matrix6d::Zero()),
@@ -25,6 +26,11 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     Kp_p_(Matrix3d::Zero()),
     Kp_o_(Matrix3d::Zero()),
     Kd6_(Matrix6d::Zero()),
+    move_time_(20.0),
+    move_length_(0.5),
+    move_initialized_(false),
+    t_move0_(0.0),
+    R_move_(cc::Rotation3::Identity()),
     draw_time_(20.0),
     draw_length_(0.5),
     draw_initialized_(false),
@@ -63,6 +69,7 @@ bool OperationalSpaceControl::init()
 
   // switches
   ros::param::get(ns + "/enable_safe", enable_safe_);
+  ros::param::get(ns + "/enable_move", enable_safe_);
   ros::param::get(ns + "/enable_draw", enable_draw_);
 
   // safe
@@ -96,7 +103,7 @@ bool OperationalSpaceControl::init()
     Kp_q6_.diagonal() << 30, 30, 20, 10, 8, 6;
   }
 
-  // Kd (diag 6) used in DRAW damping term too
+  // Kd (diag 6) used in MOVE/DRAW damping term too
   if (ros::param::get(ns + "/Kd", v) && v.size() >= 3)
   {
     Kd6_.setZero();
@@ -126,8 +133,8 @@ bool OperationalSpaceControl::init()
     Kd_safe6_ = Kd6_;
   }
 
-  // DRAW gains
-  if (ros::param::get(ns + "/Kp_draw_pos", v) && v.size() >= 3)
+  // MOVE/DRAW gains
+  if (ros::param::get(ns + "/Kp_pos", v) && v.size() >= 3)
   {
     Kp_p_.setZero();
     for (int i = 0; i < 3; ++i) Kp_p_(i, i) = v[(size_t)i];
@@ -137,7 +144,7 @@ bool OperationalSpaceControl::init()
     Kp_p_.diagonal() << 6, 6, 6;
   }
 
-  if (ros::param::get(ns + "/Kp_draw_ori", v) && v.size() >= 3)
+  if (ros::param::get(ns + "/Kp_ori", v) && v.size() >= 3)
   {
     Kp_o_.setZero();
     for (int i = 0; i < 3; ++i) Kp_o_(i, i) = v[(size_t)i];
@@ -146,6 +153,11 @@ bool OperationalSpaceControl::init()
   {
     Kp_o_.diagonal() << 3, 3, 3;
   }
+
+  // move params
+  ros::param::get(ns + "/move/time", move_time_);
+  ros::param::get(ns + "/move/length", move_length_);
+  if (move_time_ <= 1e-3) move_time_ = 20.0;
 
   // draw params
   ros::param::get(ns + "/draw/time", draw_time_);
@@ -173,12 +185,19 @@ bool OperationalSpaceControl::init()
     return false;
   }
 
+  // desired orientation in MOVE:
+  // tool z-axis -> +X (world), tool y-axis -> +Y, tool x-axis -> -Z (right-handed)
+  R_move_.setIdentity();
+  R_move_ << 0, 0, 1,
+             0, 1, 0,
+             1, 0, 0;
+
   // desired orientation in DRAW:
   // tool z-axis -> +X (world), tool y-axis -> +Y, tool x-axis -> -Z (right-handed)
   R_draw_.setIdentity();
   R_draw_ << 0, 0, 1,
              0, 1, 0,
-            -1, 0, 0;
+             1, 0, 0;
 
   // init theta_hat from model initial guess
   theta_hat_ = model_.parameterInitalGuess();
@@ -219,6 +238,9 @@ bool OperationalSpaceControl::init()
 
   ROS_INFO_STREAM("[OperationalSpaceControl] init ok"
                   << " enable_safe=" << (enable_safe_ ? 1 : 0)
+                  << " enable_move=" << (enable_move_ ? 1 : 0)
+                  << " move_time=" << move_time_
+                  << " move_length=" << move_length_
                   << " enable_draw=" << (enable_draw_ ? 1 : 0)
                   << " draw_time=" << draw_time_
                   << " draw_length=" << draw_length_);
@@ -233,12 +255,16 @@ bool OperationalSpaceControl::start()
 
   t0_ = -1.0;
   safe_done_ = false;
+  move_initialized_ = false;
+  t_move0_ = 0.0;
   draw_initialized_ = false;
   t_draw0_ = 0.0;
 
   // phase select at start
   if (enable_safe_)
     phase_ = PHASE_SAFE;
+  else if (enable_move_)
+    phase_ = PHASE_MOVE;
   else if (enable_draw_)
     phase_ = PHASE_DRAW;
   else
@@ -251,13 +277,26 @@ bool OperationalSpaceControl::start()
 bool OperationalSpaceControl::stop() { return true; }
 
 // -------------------------
-// SAFE/DRAW phase selection
+// SAFE/MOVE/DRAW phase selection
 // -------------------------
 bool OperationalSpaceControl::inSafePhase(const cc::JointPosition &q6) const
 {
   if (!enable_safe_) return false;
   const double e = (q6 - q_safe6_).norm();
   return (e > safe_tol_);
+}
+
+void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPosition &q6)
+{
+  if (move_initialized_) return;
+
+  // Use current EE position as start if safe disabled or if user jumps to move
+  X_start_ = fkPos(q6);
+  t_move0_ = t_sec;
+  move_initialized_ = true;
+
+  ROS_WARN_STREAM("[OperationalSpaceControl] MOVE init: X_start=" << X_start_.transpose()
+                  << " t_move0=" << t_move0_);
 }
 
 void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPosition &q6)
@@ -274,9 +313,45 @@ void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPositi
 }
 
 // -------------------------
+// Desired trajectory (MOVE)
+// -------------------------
+void OperationalSpaceControl::cartesianDesiredMove(
+  double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d,
+  cc::Rotation3 &Rd, cc::Vector3 &Wd)
+{
+  const double t = std::max(0.0, t_sec - t_move0_);
+
+  const double T = std::max(1e-3, move_time_);
+  const double L = move_length_;   // 直线总长度
+
+  // 归一化时间 0~1
+  double s = t / T;
+  if (s > 1.0) s = 1.0;
+
+  Xd = X_start_;
+
+  // ===== X 方向直线 =====
+  Xd(0) = X_start_(0) - L * s;
+  Xd(1) = X_start_(1);
+  Xd(2) = X_start_(2);
+
+  // ===== 速度 =====
+  Xdot_d.setZero();
+
+  if (t < T)
+    Xdot_d(0) = L / T;   // 匀速
+  else
+    Xdot_d(0) = 0.0;     // 到终点停止
+
+  // 姿态保持不变
+  Rd = R_move_;
+  Wd.setZero();
+}
+
+// -------------------------
 // Desired trajectory (DRAW)
 // -------------------------
-void OperationalSpaceControl::cartesianDesired(
+void OperationalSpaceControl::cartesianDesiredDraw(
   double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d,
   cc::Rotation3 &Rd, cc::Vector3 &Wd)
 {
@@ -302,7 +377,6 @@ void OperationalSpaceControl::cartesianDesired(
   Rd = R_draw_;
   Wd.setZero();
 }
-
 
 // -------------------------
 // Model helpers (FK/J)
@@ -361,14 +435,21 @@ OperationalSpaceControl::dlsSolve3(const Matrix3x6d &Jp, const cc::Vector3 &xdot
 }
 
 // -------------------------
-// DRAW reference qdot_r
+// MOVE/DRAW reference qdot_r
 // -------------------------
 OperationalSpaceControl::Vector6d
-OperationalSpaceControl::computeQdotR_DRAW(double t_sec, const cc::JointPosition &q6)
+OperationalSpaceControl::computeQdotR_MOVE_and_DRAW(double t_sec, const cc::JointPosition &q6)
 {
   cc::Vector3 Xd, Xdot_d, Wd;
   cc::Rotation3 Rd;
-  cartesianDesired(t_sec, Xd, Xdot_d, Rd, Wd);
+  if (phase_ == PHASE_MOVE)
+  {
+      cartesianDesiredMove(t_sec, Xd, Xdot_d, Rd, Wd);
+  }
+  else if (phase_ == PHASE_DRAW)
+  {
+      cartesianDesiredDraw(t_sec, Xd, Xdot_d, Rd, Wd);
+  }
 
   // current
   const cc::HomogeneousTransformation T_0_B = model_.T_0_B();
@@ -418,7 +499,7 @@ OperationalSpaceControl::computeQdotR_DRAW(double t_sec, const cc::JointPosition
   double wdot_norm     = xdot_r6.tail<3>().norm();
 
   ROS_INFO_STREAM_THROTTLE(1.0,
-    "[DRAW DEBUG] "
+    "[MOVE/DRAW DEBUG] "
     << "condJ=" << condJ
     << " sigma_min=" << sigma_min
     << " e_pos=" << e_pos_norm
@@ -461,8 +542,9 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
   prev_time_sec_ = t_sec;
 
   // phase routing
-  if (!enable_safe_ && enable_draw_) phase_ = PHASE_DRAW;
-  else if (!enable_safe_ && !enable_draw_) return tau; // both off
+  if (!enable_safe_ && enable_move_ && !enable_draw_) phase_ = PHASE_MOVE;
+  else if (!enable_safe_ && !enable_move_ && enable_draw_) phase_ = PHASE_DRAW;
+  else if (!enable_safe_ && !enable_move_ && !enable_draw_) return tau; // all off
   else if (enable_safe_ && !safe_done_) phase_ = PHASE_SAFE;
 
   // -------------------------
@@ -474,7 +556,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     if (e_norm <= safe_tol_)
     {
       safe_done_ = true;
-      if (enable_draw_) phase_ = PHASE_DRAW;
+      if (enable_move_) phase_ = PHASE_MOVE;
       qdot_r_prev_valid_ = false; // avoid qddot spike on transition
       resetMarkerNewSegment();
     }
@@ -532,6 +614,112 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
   }
 
   // -------------------------
+  // MOVE
+  // -------------------------
+  if (phase_ == PHASE_MOVE)
+  {
+    if (!enable_move_) return tau;
+
+    ensureMoveInit(t_sec, q6);
+
+    // ===== MOVE 完成判定 =====
+    double t_move = t_sec - t_move0_;
+    if (t_move >= move_time_)
+    {
+      ROS_WARN_STREAM("[PHASE SWITCH] MOVE -> DRAW");
+
+      phase_ = PHASE_DRAW;
+      qdot_r_prev_valid_ = false;   // 避免 qddot_r 突变
+      resetMarkerNewSegment();
+      return Vector6d::Zero();      // 当前周期先不输出旧控制
+
+    }
+
+    // qdot_r from task ref (pos + ori lock)
+    const Vector6d qdot_r = computeQdotR_MOVE_and_DRAW(t_sec, q6);
+
+    ROS_INFO_STREAM_THROTTLE(1.0,
+      "[MOVE DEBUG] |qdot_r|=" << qdot_r.norm()
+      << " |qdot|=" << qP6.norm());
+
+
+    // qddot_r by numeric diff
+    Vector6d qddot_r = Vector6d::Zero();
+    if (qdot_r_prev_valid_ && dt > 1e-6)
+      qddot_r = (qdot_r - qdot_r_prev6_) / dt;
+    qdot_r_prev6_ = qdot_r;
+    qdot_r_prev_valid_ = true;
+
+    // sliding var
+    const Vector6d s = qP6 - qdot_r;
+
+    // regressor
+    const ur::URModel::Regressor &Y = model_.regressor(q6, qP6, qdot_r, qddot_r);
+
+    if (!theta_hat_initialized_ || theta_hat_.size() != Y.cols())
+    {
+      theta_hat_ = model_.parameterInitalGuess();
+      if (theta_hat_.size() != Y.cols()) theta_hat_.setZero(Y.cols(), 1);
+      theta_hat_initialized_ = true;
+    }
+
+    Vector6d tau_ff = Vector6d::Zero();
+    if (adaptive_enabled_)
+    {
+      tau_ff = Y * theta_hat_;
+
+      ur::URModel::Parameters theta_dot =
+        (-adapt_gamma_) * (Y.transpose() * s) - adapt_sigma_ * theta_hat_;
+      theta_hat_ += theta_dot * dt;
+
+      if (theta_hat_max_ > 0.0)
+      {
+        for (int i = 0; i < theta_hat_.size(); ++i)
+          theta_hat_(i) = std::max(-theta_hat_max_, std::min(theta_hat_(i), theta_hat_max_));
+      }
+    }
+
+    tau = (-Kd6_) * s + tau_ff;
+
+    for (int i = 0; i < 6; ++i)
+      tau(i) = std::max(-tau_max_, std::min(tau(i), tau_max_));
+
+    publishControlDebug(t_sec, "MOVE", state, tau);
+
+    // trajectory markers (optional)
+    {
+      cc::Vector3 Xd, Xdot_d, Wd;
+      cc::Rotation3 Rd;
+      cartesianDesiredMove(t_sec, Xd, Xdot_d, Rd, Wd);
+
+      geometry_msgs::Point pd;
+      pd.x = Xd(0); pd.y = Xd(1); pd.z = Xd(2);
+      traj_points_.push_back(pd);
+
+      if (traj_points_.size() >= 2)
+      {
+        traj_marker_.points = traj_points_;
+        traj_marker_.header.stamp = ros::Time::now();
+        traj_pub_.publish(traj_marker_);
+      }
+
+      const cc::Vector3 X = fkPos(q6);
+      geometry_msgs::Point pa;
+      pa.x = X(0); pa.y = X(1); pa.z = X(2);
+      actual_traj_points_.push_back(pa);
+
+      if (actual_traj_points_.size() >= 2)
+      {
+        actual_traj_marker_.points = actual_traj_points_;
+        actual_traj_marker_.header.stamp = ros::Time::now();
+        actual_traj_pub_.publish(actual_traj_marker_);
+      }
+    }
+
+    return tau;
+  }
+
+  // -------------------------
   // DRAW
   // -------------------------
   if (phase_ == PHASE_DRAW)
@@ -540,8 +728,9 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
 
     ensureDrawInit(t_sec, q6);
 
+
     // qdot_r from task ref (pos + ori lock)
-    const Vector6d qdot_r = computeQdotR_DRAW(t_sec, q6);
+    const Vector6d qdot_r = computeQdotR_MOVE_and_DRAW(t_sec, q6);
 
     ROS_INFO_STREAM_THROTTLE(1.0,
       "[DRAW DEBUG] |qdot_r|=" << qdot_r.norm()
@@ -595,7 +784,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     {
       cc::Vector3 Xd, Xdot_d, Wd;
       cc::Rotation3 Rd;
-      cartesianDesired(t_sec, Xd, Xdot_d, Rd, Wd);
+      cartesianDesiredDraw(t_sec, Xd, Xdot_d, Rd, Wd);
 
       geometry_msgs::Point pd;
       pd.x = Xd(0); pd.y = Xd(1); pd.z = Xd(2);
@@ -662,7 +851,8 @@ void OperationalSpaceControl::publishControlDebug(
 {
   double phase_id = -1.0;
   if (phase == "SAFE") phase_id = 0.0;
-  else if (phase == "DRAW") phase_id = 1.0;
+  else if (phase == "MOVE") phase_id = 1.0;
+  else if (phase == "DRAW") phase_id = 2.0;
 
   std_msgs::Float64MultiArray dbg;
   dbg.data.reserve(2 + 6 + 6 + 6 + 6);

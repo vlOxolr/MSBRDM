@@ -1,5 +1,6 @@
 operational_space_ctrl:
   enable_safe: true
+  enable_move: true
   enable_draw: true
 
   safe_tol: 0.04
@@ -8,8 +9,8 @@ operational_space_ctrl:
   Kp_safe: [5,  1, 1, 0.2, 0.2, 1]
   Kd_safe: [5, 30, 40, 10, 10, 5]
 
-  Kp_draw_pos: [15, 15, 15]
-  Kp_draw_ori: [0.3, 0.5, 0.5]
+  Kp_pos: [15, 15, 15]
+  Kp_ori: [0.3, 0.5, 0.5]
   Kd:      [12, 12, 8, 4, 4, 4]  #DRAW phase: tau = -Kd_ * s + Y * theta_hat_;
 
   tau_max: 120.0
@@ -23,6 +24,10 @@ operational_space_ctrl:
     sigma: 0.02
     theta_hat_max: 200.0
 
+  move:
+    length: 0.15
+    time: 20.0
+
   draw:
-    length: 0.1
+    length: 0.15
     time: 20.0

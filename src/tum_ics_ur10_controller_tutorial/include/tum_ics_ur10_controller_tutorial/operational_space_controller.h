@@ -36,7 +36,8 @@ private:
   enum Phase
   {
     PHASE_SAFE = 0,
-    PHASE_DRAW = 1
+    PHASE_MOVE = 1,
+    PHASE_DRAW = 2
   };
 
 private:
@@ -46,6 +47,7 @@ private:
 
   // ===== YAML switches =====
   bool enable_safe_;
+  bool enable_move_;
   bool enable_draw_;
 
   // ===== SAFE =====
@@ -54,17 +56,24 @@ private:
   Vector6d q_safe6_;
   double safe_tol_;
 
-  // ===== DRAW =====
+  // ===== MOVE/DRAW =====
   Matrix3d Kp_p_;       // position feedback (diag)
-  Matrix3d Kp_o_;       // orientation feedback (diag) (DRAW only)
-  Matrix6d Kd6_;        // damping on sliding variable in DRAW (diag)
+  Matrix3d Kp_o_;       // orientation feedback (diag) (MOVE/DRAW only)
+  Matrix6d Kd6_;        // damping on sliding variable in MOVE/DRAW (diag)
+  double move_time_;    // fixed 20s
+  double move_length_;  // 0.5m along +Y
   double draw_time_;    // fixed 20s
   double draw_length_;  // 0.5m along +Y
+
+  // move timing & start pose
+  bool move_initialized_;
+  double t_move0_;
+  cc::Vector3 X_start_;     // fixed x,z and y start
+  cc::Rotation3 R_move_;    // desired orientation in MOVE (tool z -> +X)
 
   // draw timing & start pose
   bool draw_initialized_;
   double t_draw0_;
-  cc::Vector3 X_start_;     // fixed x,z and y start
   cc::Rotation3 R_draw_;    // desired orientation in DRAW (tool z -> +X)
 
   // ===== Adaptive =====
@@ -129,11 +138,13 @@ private:
 
   // ===== phase helpers =====
   bool inSafePhase(const cc::JointPosition &q6) const;
+  void ensureMoveInit(double t_sec, const cc::JointPosition &q6);
   void ensureDrawInit(double t_sec, const cc::JointPosition &q6);
 
   // ===== reference generators =====
-  void cartesianDesired(double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d, cc::Rotation3 &Rd, cc::Vector3 &Wd);
-  Vector6d computeQdotR_DRAW(double t_sec, const cc::JointPosition &q6);
+  void cartesianDesiredMove(double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d, cc::Rotation3 &Rd, cc::Vector3 &Wd);
+  void cartesianDesiredDraw(double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d, cc::Rotation3 &Rd, cc::Vector3 &Wd);
+  Vector6d computeQdotR_MOVE_and_DRAW(double t_sec, const cc::JointPosition &q6);
 
   // ===== model helpers =====
   cc::Vector3 fkPos(const cc::JointPosition &q6) const;
