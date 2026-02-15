@@ -4,7 +4,7 @@ operational_space_ctrl:
   enable_draw: true
 
   safe_tol: 0.04
-  q_safe: [0.2, -1.2, 1.0, -1.8, -1.3, 0.8]  # q_safe: [0, -0.7, 0.7, -1, 0.3, 1]
+  q_safe: [0.001, -0.8998, 1.2470, -1.9591, -1.56276, 0.8]  # q_safe: [0, -0.7, 0.7, -1, 0.3, 1]
 
   Kp_safe: [5,  1, 1, 0.2, 0.2, 1]
   Kd_safe: [5, 30, 40, 10, 10, 5]
@@ -25,9 +25,14 @@ operational_space_ctrl:
     theta_hat_max: 200.0
 
   move:
-    length: 0.15
     time: 20.0
+    speed: 0.0    # m/s, <=0 means use move.time
 
   draw:
-    length: 0.15
     time: 20.0
+    speed: 0.0    # m/s, <=0 means use draw.time or length_px/speed
+    use_fixed_z: false
+    fixed_z: 0.0
+
+  trajectory:
+    topic: /ur10/planar_polynomial_trajectories  # std_msgs/String XML

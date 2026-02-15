@@ -10,7 +10,11 @@
 #include <visualization_msgs/Marker.h>
 #include <geometry_msgs/Point.h>
 #include <std_msgs/Float64MultiArray.h>
+#include <std_msgs/String.h>
 #include <sensor_msgs/JointState.h>
+#include <mutex>
+#include <string>
+#include <vector>
 
 namespace tum_ics_ur_robot_lli
 {
@@ -32,6 +36,13 @@ private:
   using Matrix6d = Eigen::Matrix<double, 6, 6>;
   using Matrix3d = Eigen::Matrix<double, 3, 3>;
   using Matrix3x6d = Eigen::Matrix<double, 3, 6>;
+
+  struct PlanarPolynomialTrajectory
+  {
+    std::vector<double> coeff_x;
+    std::vector<double> coeff_y;
+    double length = 0.0;
+  };
 
   enum Phase
   {
@@ -60,14 +71,21 @@ private:
   Matrix3d Kp_p_;       // position feedback (diag)
   Matrix3d Kp_o_;       // orientation feedback (diag) (MOVE/DRAW only)
   Matrix6d Kd6_;        // damping on sliding variable in MOVE/DRAW (diag)
-  double move_time_;    // fixed 20s
-  double move_length_;  // 0.5m along +Y
-  double draw_time_;    // fixed 20s
-  double draw_length_;  // 0.5m along +Y
+  double move_time_;
+  double move_speed_;
+  double draw_time_;
+  double draw_speed_;
+  bool use_fixed_draw_z_;
+  double fixed_draw_z_;
 
-  // ===== trajectory loop control =====
-  int traj_loop_count_;       // current loop index
-  int traj_loop_max_;         // maximum loop count
+  // active segment timing/path
+  double active_move_time_;
+  double active_draw_time_;
+  double active_draw_z_;
+  cc::Vector3 move_start_pos_;
+  cc::Vector3 move_goal_pos_;
+  PlanarPolynomialTrajectory active_traj_;
+  bool active_traj_valid_;
 
   // move timing & start pose
   bool move_initialized_;
@@ -79,6 +97,14 @@ private:
   bool draw_initialized_;
   double t_draw0_;
   cc::Rotation3 R_draw_;    // desired orientation in DRAW (tool z -> +X)
+
+  // ===== trajectory input =====
+  ros::Subscriber traj_sub_;
+  std::string traj_topic_;
+  mutable std::mutex traj_mutex_;
+  std::vector<PlanarPolynomialTrajectory> trajectory_batch_;
+  size_t current_traj_idx_;
+  bool trajectory_reset_requested_;
 
   // ===== Adaptive =====
   bool adaptive_enabled_;
@@ -144,6 +170,16 @@ private:
   bool inSafePhase(const cc::JointPosition &q6) const;
   void ensureMoveInit(double t_sec, const cc::JointPosition &q6);
   void ensureDrawInit(double t_sec, const cc::JointPosition &q6);
+  void trajectoryCallback(const std_msgs::String::ConstPtr &msg);
+  bool hasPendingTrajectory() const;
+  bool getTrajectoryAtIndex(size_t index, PlanarPolynomialTrajectory &traj) const;
+  static bool extractXmlTag(const std::string &xml, const std::string &tag, std::string &content);
+  static bool extractXmlAttribute(const std::string &xml, const std::string &attr, std::string &value);
+  static bool toDouble(const std::string &text, double &value);
+  static bool toInt(const std::string &text, int &value);
+  static std::vector<double> parseCoefficientList(const std::string &text);
+  static double evalPoly(const std::vector<double> &coeff, double s);
+  static double evalPolyDerivative(const std::vector<double> &coeff, double s);
 
   // ===== reference generators =====
   void cartesianDesiredMove(double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d, cc::Rotation3 &Rd, cc::Vector3 &Wd);

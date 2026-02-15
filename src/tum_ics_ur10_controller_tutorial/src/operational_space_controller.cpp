@@ -3,8 +3,11 @@
 #include <ros/ros.h>
 #include <control_core/math/error_functions.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
+#include <regex>
+#include <sstream>
 #include <Eigen/SVD>
 
 namespace tum_ics_ur_robot_lli
@@ -12,6 +15,7 @@ namespace tum_ics_ur_robot_lli
 namespace RobotControllers
 {
 
+// 功能：构造控制器并初始化全部成员变量与默认参数。
 OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &name)
   : ControlEffort(name, SPLINE_TYPE, JOINT_SPACE, weight),
     model_("ur10_model"),
@@ -27,16 +31,29 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     Kp_o_(Matrix3d::Zero()),
     Kd6_(Matrix6d::Zero()),
     move_time_(20.0),
-    move_length_(0.5),
+    move_speed_(0.0),
+    draw_time_(20.0),
+    draw_speed_(0.0),
+    use_fixed_draw_z_(false),
+    fixed_draw_z_(0.0),
+    active_move_time_(20.0),
+    active_draw_time_(20.0),
+    active_draw_z_(0.0),
+    move_start_pos_(cc::Vector3::Zero()),
+    move_goal_pos_(cc::Vector3::Zero()),
+    active_traj_(),
+    active_traj_valid_(false),
     move_initialized_(false),
     t_move0_(0.0),
     R_move_(cc::Rotation3::Identity()),
-    draw_time_(20.0),
-    draw_length_(0.5),
     draw_initialized_(false),
     t_draw0_(0.0),
     X_start_(cc::Vector3::Zero()),
     R_draw_(cc::Rotation3::Identity()),
+    traj_topic_("/ur10/planar_polynomial_trajectories"),
+    trajectory_batch_(),
+    current_traj_idx_(0),
+    trajectory_reset_requested_(false),
     adaptive_enabled_(true),
     adapt_gamma_(0.5),
     adapt_sigma_(0.02),
@@ -52,18 +69,21 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     tau_max_(120.0),
     qdot_r_max_(2.0),
     xdot_r_max_(0.25),
-    wdot_r_max_(0.80),
-    traj_loop_count_(0),
-    traj_loop_max_(3)
+    wdot_r_max_(0.80)
 {
 }
 
+// 功能：析构控制器对象。
 OperationalSpaceControl::~OperationalSpaceControl() {}
 
+// 功能：记录初始关节状态（兼容上层接口）。
 void OperationalSpaceControl::setQInit(const JointState &q_init) { q_init_ = q_init; }
+// 功能：记录 home 关节状态（兼容上层接口）。
 void OperationalSpaceControl::setQHome(const JointState &q_home) { q_home_ = q_home; }
+// 功能：记录 park 关节状态（兼容上层接口）。
 void OperationalSpaceControl::setQPark(const JointState &q_park) { q_park_ = q_park; }
 
+// 功能：读取参数、初始化模型与 ROS 发布订阅器。
 bool OperationalSpaceControl::init()
 {
   ros::NodeHandle nh_private("~");
@@ -158,13 +178,18 @@ bool OperationalSpaceControl::init()
 
   // move params
   ros::param::get(ns + "/move/time", move_time_);
-  ros::param::get(ns + "/move/length", move_length_);
+  ros::param::get(ns + "/move/speed", move_speed_);
   if (move_time_ <= 1e-3) move_time_ = 20.0;
 
   // draw params
   ros::param::get(ns + "/draw/time", draw_time_);
-  ros::param::get(ns + "/draw/length", draw_length_);
+  ros::param::get(ns + "/draw/speed", draw_speed_);
+  ros::param::get(ns + "/draw/use_fixed_z", use_fixed_draw_z_);
+  ros::param::get(ns + "/draw/fixed_z", fixed_draw_z_);
   if (draw_time_ <= 1e-3) draw_time_ = 20.0;
+
+  // trajectory input
+  ros::param::get(ns + "/trajectory/topic", traj_topic_);
 
   // adaptive
   ros::param::get(ns + "/adaptive/enabled", adaptive_enabled_);
@@ -211,6 +236,7 @@ bool OperationalSpaceControl::init()
   task_error_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/ur10/task_space_error", 1);
   effort_debug_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/ur10/joint_effort_debug", 1);
   effort_joint_state_pub_ = nh_.advertise<sensor_msgs::JointState>("/ur10/joint_effort_state", 1);
+  traj_sub_ = nh_.subscribe(traj_topic_, 1, &OperationalSpaceControl::trajectoryCallback, this);
 
   publishDeleteAllMarkers();
 
@@ -242,14 +268,16 @@ bool OperationalSpaceControl::init()
                   << " enable_safe=" << (enable_safe_ ? 1 : 0)
                   << " enable_move=" << (enable_move_ ? 1 : 0)
                   << " move_time=" << move_time_
-                  << " move_length=" << move_length_
+                  << " move_speed=" << move_speed_
                   << " enable_draw=" << (enable_draw_ ? 1 : 0)
                   << " draw_time=" << draw_time_
-                  << " draw_length=" << draw_length_);
+                  << " draw_speed=" << draw_speed_
+                  << " traj_topic=" << traj_topic_);
 
   return true;
 }
 
+// 功能：重置运行时状态并选择初始阶段。
 bool OperationalSpaceControl::start()
 {
   qdot_r_prev_valid_ = false;
@@ -261,6 +289,9 @@ bool OperationalSpaceControl::start()
   t_move0_ = 0.0;
   draw_initialized_ = false;
   t_draw0_ = 0.0;
+  active_traj_valid_ = false;
+  active_move_time_ = move_time_;
+  active_draw_time_ = draw_time_;
 
   // phase select at start
   if (enable_safe_)
@@ -276,11 +307,13 @@ bool OperationalSpaceControl::start()
   return true;
 }
 
+// 功能：停止控制器（当前无额外清理逻辑）。
 bool OperationalSpaceControl::stop() { return true; }
 
 // -------------------------
 // SAFE/MOVE/DRAW phase selection
 // -------------------------
+// 功能：判断当前关节是否仍需执行 SAFE 收敛。
 bool OperationalSpaceControl::inSafePhase(const cc::JointPosition &q6) const
 {
   if (!enable_safe_) return false;
@@ -288,24 +321,301 @@ bool OperationalSpaceControl::inSafePhase(const cc::JointPosition &q6) const
   return (e > safe_tol_);
 }
 
+// 功能：检查是否还有未执行的轨迹段。
+bool OperationalSpaceControl::hasPendingTrajectory() const
+{
+  std::lock_guard<std::mutex> lock(traj_mutex_);
+  return current_traj_idx_ < trajectory_batch_.size();
+}
+
+// 功能：按序号读取缓存中的某条轨迹。
+bool OperationalSpaceControl::getTrajectoryAtIndex(size_t index, PlanarPolynomialTrajectory &traj) const
+{
+  std::lock_guard<std::mutex> lock(traj_mutex_);
+  if (index >= trajectory_batch_.size()) return false;
+  traj = trajectory_batch_[index];
+  return true;
+}
+
+// 功能：提取指定 XML 标签的内部文本。
+bool OperationalSpaceControl::extractXmlTag(const std::string &xml, const std::string &tag, std::string &content)
+{
+  const std::regex re("<" + tag + "\\b[^>]*>([\\s\\S]*?)</" + tag + ">", std::regex::icase);
+  std::smatch m;
+  if (!std::regex_search(xml, m, re) || m.size() < 2) return false;
+  content = m[1].str();
+  return true;
+}
+
+// 功能：提取指定 XML 属性值。
+bool OperationalSpaceControl::extractXmlAttribute(const std::string &xml, const std::string &attr, std::string &value)
+{
+  const std::regex re(attr + "\\s*=\\s*\"([^\"]+)\"", std::regex::icase);
+  std::smatch m;
+  if (!std::regex_search(xml, m, re) || m.size() < 2) return false;
+  value = m[1].str();
+  return true;
+}
+
+// 功能：将字符串安全转换为 double。
+bool OperationalSpaceControl::toDouble(const std::string &text, double &value)
+{
+  try
+  {
+    size_t end = 0;
+    value = std::stod(text, &end);
+    while (end < text.size() && std::isspace(static_cast<unsigned char>(text[end]))) ++end;
+    return end == text.size();
+  }
+  catch (const std::exception &)
+  {
+    return false;
+  }
+}
+
+// 功能：将字符串安全转换为 int。
+bool OperationalSpaceControl::toInt(const std::string &text, int &value)
+{
+  try
+  {
+    size_t end = 0;
+    const long parsed = std::stol(text, &end, 10);
+    while (end < text.size() && std::isspace(static_cast<unsigned char>(text[end]))) ++end;
+    if (end != text.size()) return false;
+    value = static_cast<int>(parsed);
+    return true;
+  }
+  catch (const std::exception &)
+  {
+    return false;
+  }
+}
+
+// 功能：从文本中解析多项式系数序列。
+std::vector<double> OperationalSpaceControl::parseCoefficientList(const std::string &text)
+{
+  std::vector<double> coeffs;
+  const std::regex number_re("[+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?");
+  for (std::sregex_iterator it(text.begin(), text.end(), number_re), end; it != end; ++it)
+  {
+    try
+    {
+      coeffs.push_back(std::stod((*it).str()));
+    }
+    catch (const std::exception &)
+    {
+    }
+  }
+  return coeffs;
+}
+
+// 功能：按升幂系数评估多项式值（a_0, a_1, ..., a_n）。
+double OperationalSpaceControl::evalPoly(const std::vector<double> &coeff, double s)
+{
+  double value = 0.0;
+  double p = 1.0;
+  for (size_t i = 0; i < coeff.size(); ++i)
+  {
+    value += coeff[i] * p;
+    p *= s;
+  }
+  return value;
+}
+
+// 功能：按升幂系数评估多项式一阶导数（a_0, a_1, ..., a_n）。
+double OperationalSpaceControl::evalPolyDerivative(const std::vector<double> &coeff, double s)
+{
+  if (coeff.size() < 2) return 0.0;
+
+  double value = 0.0;
+  double p = 1.0;
+  for (size_t i = 1; i < coeff.size(); ++i)
+  {
+    value += static_cast<double>(i) * coeff[i] * p;
+    p *= s;
+  }
+  return value;
+}
+
+// 功能：解析 XML 轨迹批次并重置执行状态机。
+void OperationalSpaceControl::trajectoryCallback(const std_msgs::String::ConstPtr &msg)
+{
+  const std::string xml = msg->data;
+  if (xml.empty())
+  {
+    ROS_WARN_STREAM("[OperationalSpaceControl] trajectoryCallback: empty message.");
+    return;
+  }
+
+  std::smatch strokes_match;
+  const std::regex strokes_re("<strokes\\b([^>]*)>([\\s\\S]*?)</strokes>", std::regex::icase);
+  if (!std::regex_search(xml, strokes_match, strokes_re) || strokes_match.size() < 3)
+  {
+    ROS_ERROR_STREAM("[OperationalSpaceControl] trajectoryCallback: missing <strokes> block.");
+    return;
+  }
+
+  int n_traj = 0;
+  {
+    std::string count_text;
+    if (!extractXmlAttribute(strokes_match[1].str(), "count", count_text) || !toInt(count_text, n_traj) || n_traj <= 0)
+    {
+      ROS_ERROR_STREAM("[OperationalSpaceControl] trajectoryCallback: invalid strokes count.");
+      return;
+    }
+  }
+
+  std::vector<PlanarPolynomialTrajectory> parsed(static_cast<size_t>(n_traj));
+  std::vector<bool> parsed_mask(static_cast<size_t>(n_traj), false);
+
+  const std::string strokes_body = strokes_match[2].str();
+  const std::regex stroke_re("<stroke\\b([^>]*)>([\\s\\S]*?)</stroke>", std::regex::icase);
+  for (std::sregex_iterator it(strokes_body.begin(), strokes_body.end(), stroke_re), end; it != end; ++it)
+  {
+    const std::string stroke_attr = (*it)[1].str();
+    const std::string stroke_body = (*it)[2].str();
+
+    int stroke_index = -1;
+    int deg_used = -1;
+    std::string index_text;
+    std::string deg_text;
+    if (!extractXmlAttribute(stroke_attr, "index", index_text) || !toInt(index_text, stroke_index))
+    {
+      ROS_ERROR_STREAM("[OperationalSpaceControl] trajectoryCallback: stroke missing valid index.");
+      return;
+    }
+    if (!extractXmlAttribute(stroke_attr, "deg_used", deg_text) || !toInt(deg_text, deg_used) || deg_used < 0)
+    {
+      ROS_ERROR_STREAM("[OperationalSpaceControl] trajectoryCallback: stroke " << stroke_index
+                       << " missing valid deg_used.");
+      return;
+    }
+    if (stroke_index < 0 || stroke_index >= n_traj)
+    {
+      ROS_ERROR_STREAM("[OperationalSpaceControl] trajectoryCallback: stroke index out of range: "
+                       << stroke_index << ", count=" << n_traj);
+      return;
+    }
+
+    std::string length_text;
+    double length_px = 0.0;
+    if (extractXmlTag(stroke_body, "length_px", length_text)) (void)toDouble(length_text, length_px);
+
+    std::string polyfit_block;
+    std::string x_text;
+    std::string y_text;
+    if (!extractXmlTag(stroke_body, "polyfit", polyfit_block) ||
+        !extractXmlTag(polyfit_block, "x", x_text) ||
+        !extractXmlTag(polyfit_block, "y", y_text))
+    {
+      ROS_ERROR_STREAM("[OperationalSpaceControl] trajectoryCallback: stroke " << stroke_index
+                       << " missing polyfit/x/y.");
+      return;
+    }
+
+    const std::vector<double> coeff_x = parseCoefficientList(x_text);
+    const std::vector<double> coeff_y = parseCoefficientList(y_text);
+    const size_t needed_size = static_cast<size_t>(deg_used + 1);
+    if (coeff_x.size() < needed_size || coeff_y.size() < needed_size)
+    {
+      ROS_ERROR_STREAM("[OperationalSpaceControl] trajectoryCallback: stroke " << stroke_index
+                       << " coeff size < deg_used+1. deg_used=" << deg_used
+                       << " |x|=" << coeff_x.size() << " |y|=" << coeff_y.size());
+      return;
+    }
+
+    PlanarPolynomialTrajectory traj;
+    traj.length = std::max(0.0, length_px);
+    traj.coeff_x.assign(coeff_x.begin(), coeff_x.begin() + needed_size);
+    traj.coeff_y.assign(coeff_y.begin(), coeff_y.begin() + needed_size);
+
+    parsed[static_cast<size_t>(stroke_index)] = std::move(traj);
+    parsed_mask[static_cast<size_t>(stroke_index)] = true;
+  }
+
+  for (int i = 0; i < n_traj; ++i)
+  {
+    if (!parsed_mask[static_cast<size_t>(i)])
+    {
+      ROS_ERROR_STREAM("[OperationalSpaceControl] trajectoryCallback: missing stroke index " << i);
+      return;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(traj_mutex_);
+    trajectory_batch_ = std::move(parsed);
+    current_traj_idx_ = 0;
+    trajectory_reset_requested_ = true;
+  }
+
+  ROS_WARN_STREAM("[OperationalSpaceControl] received trajectory batch: count=" << n_traj
+                  << ", order by index, state machine reset to SAFE->MOVE->DRAW.");
+}
+
+// 功能：初始化 MOVE 阶段（SAFE 点到当前轨迹起点的直线）。
 void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPosition &q6)
 {
   if (move_initialized_) return;
 
-  // Use current EE position as start if safe disabled or if user jumps to move
-  X_start_ = fkPos(q6);
+  size_t traj_idx = 0;
+  PlanarPolynomialTrajectory traj;
+  {
+    std::lock_guard<std::mutex> lock(traj_mutex_);
+    traj_idx = current_traj_idx_;
+    if (traj_idx >= trajectory_batch_.size())
+    {
+      ROS_WARN_STREAM_THROTTLE(1.0, "[OperationalSpaceControl] MOVE init waiting trajectory.");
+      return;
+    }
+    traj = trajectory_batch_[traj_idx];
+  }
+
+  move_start_pos_ = fkPos(q6);
+  active_draw_z_ = use_fixed_draw_z_ ? fixed_draw_z_ : move_start_pos_(2);
+
+  const double x0 = evalPoly(traj.coeff_x, 0.0);
+  const double y0 = evalPoly(traj.coeff_y, 0.0);
+  move_goal_pos_ << x0, y0, active_draw_z_;
+
+  active_traj_ = traj;
+  active_traj_valid_ = true;
+
+  active_move_time_ = std::max(1e-3, move_time_);
+  if (move_speed_ > 1e-6)
+  {
+    const double dist = (move_goal_pos_ - move_start_pos_).norm();
+    active_move_time_ = std::max(1e-3, dist / move_speed_);
+  }
+
+  active_draw_time_ = std::max(1e-3, draw_time_);
+  if (draw_speed_ > 1e-6 && active_traj_.length > 1e-6)
+  {
+    active_draw_time_ = std::max(1e-3, active_traj_.length / draw_speed_);
+  }
+
+  X_start_ = move_start_pos_;
   t_move0_ = t_sec;
   move_initialized_ = true;
+  draw_initialized_ = false;
 
-  ROS_WARN_STREAM("[OperationalSpaceControl] MOVE init: X_start=" << X_start_.transpose()
-                  << " t_move0=" << t_move0_);
+  ROS_WARN_STREAM("[OperationalSpaceControl] MOVE init: idx=" << traj_idx
+                  << " X_start=" << move_start_pos_.transpose()
+                  << " X_goal=" << move_goal_pos_.transpose()
+                  << " T_move=" << active_move_time_
+                  << " T_draw=" << active_draw_time_);
 }
 
+// 功能：初始化 DRAW 阶段的起始时刻与参考状态。
 void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPosition &q6)
 {
   if (draw_initialized_) return;
+  if (!active_traj_valid_)
+  {
+    ROS_WARN_STREAM_THROTTLE(1.0, "[OperationalSpaceControl] DRAW init skipped: no active trajectory.");
+    return;
+  }
 
-  // Use current EE position as start if safe disabled or if user jumps to draw
   X_start_ = fkPos(q6);
   t_draw0_ = t_sec;
   draw_initialized_ = true;
@@ -317,35 +627,30 @@ void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPositi
 // -------------------------
 // Desired trajectory (MOVE)
 // -------------------------
+// 功能：生成 MOVE 阶段的期望笛卡尔位置/速度/姿态。
 void OperationalSpaceControl::cartesianDesiredMove(
   double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d,
   cc::Rotation3 &Rd, cc::Vector3 &Wd)
 {
   const double t = std::max(0.0, t_sec - t_move0_);
+  const double T = std::max(1e-3, active_move_time_);
+  double tau = t / T;
+  if (tau > 1.0) tau = 1.0;
 
-  const double T = std::max(1e-3, move_time_);
-  const double L = move_length_ - 0.05 * traj_loop_count_;
+  // 五次最小急动度插值：s(0)=0,s(1)=1 且端点速度加速度为0
+  const double tau2 = tau * tau;
+  const double tau3 = tau2 * tau;
+  const double tau4 = tau3 * tau;
+  const double tau5 = tau4 * tau;
+  const double s = 10.0 * tau3 - 15.0 * tau4 + 6.0 * tau5;
 
-  // 归一化时间 0~1
-  double s = t / T;
-  if (s > 1.0) s = 1.0;
+  double sdot = 0.0;
+  if (t < T) sdot = (30.0 * tau2 - 60.0 * tau3 + 30.0 * tau4) / T;
 
-  Xd = X_start_;
+  const cc::Vector3 delta = move_goal_pos_ - move_start_pos_;
+  Xd = move_start_pos_ + s * delta;
+  Xdot_d = sdot * delta;
 
-  // ===== X 方向直线 =====
-  Xd(0) = X_start_(0) - L * s;
-  Xd(1) = X_start_(1);
-  Xd(2) = X_start_(2);
-
-  // ===== 速度 =====
-  Xdot_d.setZero();
-
-  if (t < T)
-    Xdot_d(0) = L / T;   // 匀速
-  else
-    Xdot_d(0) = 0.0;     // 到终点停止
-
-  // 姿态保持不变
   Rd = R_move_;
   Wd.setZero();
 }
@@ -353,28 +658,38 @@ void OperationalSpaceControl::cartesianDesiredMove(
 // -------------------------
 // Desired trajectory (DRAW)
 // -------------------------
+// 功能：生成 DRAW 阶段的期望笛卡尔位置/速度/姿态。
 void OperationalSpaceControl::cartesianDesiredDraw(
   double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d,
   cc::Rotation3 &Rd, cc::Vector3 &Wd)
 {
+  if (!active_traj_valid_)
+  {
+    Xd = X_start_;
+    Xdot_d.setZero();
+    Rd = R_draw_;
+    Wd.setZero();
+    return;
+  }
+
   const double t = std::max(0.0, t_sec - t_draw0_);
+  const double T_draw = std::max(1e-3, active_draw_time_);
+  double t_norm = t / T_draw;
+  if (t_norm > 1.0) t_norm = 1.0;
 
-  double T = draw_time_;
-  double R = draw_length_ - 0.05 * traj_loop_count_;
+  const double x = evalPoly(active_traj_.coeff_x, t_norm);
+  const double y = evalPoly(active_traj_.coeff_y, t_norm);
+  const double dx_dt_norm = evalPolyDerivative(active_traj_.coeff_x, t_norm);
+  const double dy_dt_norm = evalPolyDerivative(active_traj_.coeff_y, t_norm);
 
-  double omega = 2.0 * M_PI / std::max(1e-3, T);
+  Xd << x, y, active_draw_z_;
 
-  Xd = X_start_;
-
-  // ===== XY 平面圆 =====
-  Xd(0) = X_start_(0) + R * std::cos(omega * t);
-  Xd(1) = X_start_(1) + R * std::sin(omega * t);
-  Xd(2) = X_start_(2);
-
-  // 速度
   Xdot_d.setZero();
-  Xdot_d(0) = -R * omega * std::sin(omega * t);
-  Xdot_d(1) =  R * omega * std::cos(omega * t);
+  if (t < T_draw)
+  {
+    Xdot_d(0) = dx_dt_norm / T_draw;
+    Xdot_d(1) = dy_dt_norm / T_draw;
+  }
 
   Rd = R_draw_;
   Wd.setZero();
@@ -383,6 +698,7 @@ void OperationalSpaceControl::cartesianDesiredDraw(
 // -------------------------
 // Model helpers (FK/J)
 // -------------------------
+// 功能：计算末端在世界系下的位置。
 cc::Vector3 OperationalSpaceControl::fkPos(const cc::JointPosition &q6) const
 {
   const cc::HomogeneousTransformation T_0_B = model_.T_0_B();
@@ -393,6 +709,7 @@ cc::Vector3 OperationalSpaceControl::fkPos(const cc::JointPosition &q6) const
   return X;
 }
 
+// 功能：计算末端在世界系下的姿态。
 cc::Rotation3 OperationalSpaceControl::fkOri(const cc::JointPosition &q6) const
 {
   const cc::HomogeneousTransformation T_0_B = model_.T_0_B();
@@ -401,6 +718,7 @@ cc::Rotation3 OperationalSpaceControl::fkOri(const cc::JointPosition &q6) const
   return T.orientation();
 }
 
+// 功能：计算并转换到世界系的 6x6 雅可比矩阵。
 OperationalSpaceControl::Matrix6d OperationalSpaceControl::jacobian6(const cc::JointPosition &q6) const
 {
   const cc::Jacobian J_tool_0 = model_.J_tool_0(q6);
@@ -420,6 +738,7 @@ OperationalSpaceControl::Matrix6d OperationalSpaceControl::jacobian6(const cc::J
 // -------------------------
 // DLS
 // -------------------------
+// 功能：用阻尼最小二乘求解 6 维任务到关节速度映射。
 OperationalSpaceControl::Vector6d
 OperationalSpaceControl::dlsSolve6(const Matrix6d &J, const Vector6d &xdot, double lambda)
 {
@@ -428,6 +747,7 @@ OperationalSpaceControl::dlsSolve6(const Matrix6d &J, const Vector6d &xdot, doub
   return J.transpose() * y;
 }
 
+// 功能：用阻尼最小二乘求解 3 维任务到关节速度映射。
 OperationalSpaceControl::Vector6d
 OperationalSpaceControl::dlsSolve3(const Matrix3x6d &Jp, const cc::Vector3 &xdot_p, double lambda)
 {
@@ -439,6 +759,7 @@ OperationalSpaceControl::dlsSolve3(const Matrix3x6d &Jp, const cc::Vector3 &xdot
 // -------------------------
 // MOVE/DRAW reference qdot_r
 // -------------------------
+// 功能：在 MOVE/DRAW 阶段生成关节参考速度 qdot_r。
 OperationalSpaceControl::Vector6d
 OperationalSpaceControl::computeQdotR_MOVE_and_DRAW(double t_sec, const cc::JointPosition &q6)
 {
@@ -527,6 +848,7 @@ OperationalSpaceControl::computeQdotR_MOVE_and_DRAW(double t_sec, const cc::Join
 // -------------------------
 // main update
 // -------------------------
+// 功能：主控制循环，执行 SAFE/MOVE/DRAW 状态机并输出关节力矩。
 OperationalSpaceControl::Vector6d
 OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
 {
@@ -543,11 +865,27 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
   if (prev_time_sec_ <= 0.0 || !std::isfinite(dt) || dt <= 0.0) dt = 1e-3;
   prev_time_sec_ = t_sec;
 
-  // phase routing
-  if (!enable_safe_ && enable_move_ && !enable_draw_) phase_ = PHASE_MOVE;
-  else if (!enable_safe_ && !enable_move_ && enable_draw_) phase_ = PHASE_DRAW;
-  else if (!enable_safe_ && !enable_move_ && !enable_draw_) return tau; // all off
-  else if (enable_safe_ && !safe_done_) phase_ = PHASE_SAFE;
+  bool trajectory_reset = false;
+  {
+    std::lock_guard<std::mutex> lock(traj_mutex_);
+    if (trajectory_reset_requested_)
+    {
+      trajectory_reset_requested_ = false;
+      trajectory_reset = true;
+    }
+  }
+  if (trajectory_reset)
+  {
+    safe_done_ = false;
+    move_initialized_ = false;
+    draw_initialized_ = false;
+    active_traj_valid_ = false;
+    qdot_r_prev_valid_ = false;
+    phase_ = enable_safe_ ? PHASE_SAFE : PHASE_MOVE;
+    resetMarkerNewSegment();
+  }
+
+  if (!enable_safe_ && !enable_move_ && !enable_draw_) return tau;
 
   // -------------------------
   // SAFE
@@ -558,20 +896,21 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     if (e_norm <= safe_tol_)
     {
       safe_done_ = true;
-      if (traj_loop_count_ < traj_loop_max_)
+      if (hasPendingTrajectory() && enable_move_)
       {
-        ROS_WARN_STREAM("[SAFE] start next loop, loop=" << traj_loop_count_);
-
+        ROS_WARN_STREAM("[PHASE SWITCH] SAFE -> MOVE");
         phase_ = PHASE_MOVE;
+        move_initialized_ = false;
+        draw_initialized_ = false;
+        active_traj_valid_ = false;
+        qdot_r_prev_valid_ = false; // avoid qddot spike on transition
+        resetMarkerNewSegment();
+        return Vector6d::Zero();
       }
-      else
-      {
-        ROS_WARN_STREAM("[SAFE] all loops finished.");
-        return Vector6d::Zero();   
-      }
-      move_initialized_ = false;
-      qdot_r_prev_valid_ = false; // avoid qddot spike on transition
-      resetMarkerNewSegment();
+    }
+    else
+    {
+      safe_done_ = false;
     }
 
     // qrP = -Kp * (q-q_safe)
@@ -632,12 +971,18 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
   if (phase_ == PHASE_MOVE)
   {
     if (!enable_move_) return tau;
+    if (!hasPendingTrajectory())
+    {
+      phase_ = enable_safe_ ? PHASE_SAFE : PHASE_MOVE;
+      return Vector6d::Zero();
+    }
 
     ensureMoveInit(t_sec, q6);
+    if (!move_initialized_) return Vector6d::Zero();
 
     // ===== MOVE 完成判定 =====
     double t_move = t_sec - t_move0_;
-    if (t_move >= move_time_)
+    if (t_move >= active_move_time_)
     {
       ROS_WARN_STREAM("[PHASE SWITCH] MOVE -> DRAW");
 
@@ -646,7 +991,6 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
       qdot_r_prev_valid_ = false;   // 避免 qddot_r 突变
       resetMarkerNewSegment();
       return Vector6d::Zero();      // 当前周期先不输出旧控制
-
     }
 
     // qdot_r from task ref (pos + ori lock)
@@ -739,18 +1083,33 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
   if (phase_ == PHASE_DRAW)
   {
     if (!enable_draw_) return tau;
+    if (!hasPendingTrajectory())
+    {
+      phase_ = enable_safe_ ? PHASE_SAFE : PHASE_DRAW;
+      return Vector6d::Zero();
+    }
 
     ensureDrawInit(t_sec, q6);
+    if (!draw_initialized_) return Vector6d::Zero();
 
     // ===== DRAW 完成判定 =====
     double t_draw = t_sec - t_draw0_;
-    if (t_draw >= draw_time_)
+    if (t_draw >= active_draw_time_)
     {
-      ROS_WARN_STREAM("[PHASE SWITCH] DRAW finished one loop");
-      traj_loop_count_++;
-      phase_ = PHASE_SAFE;
+      {
+        std::lock_guard<std::mutex> lock(traj_mutex_);
+        if (current_traj_idx_ < trajectory_batch_.size())
+          ++current_traj_idx_;
+      }
+      ROS_WARN_STREAM("[PHASE SWITCH] DRAW -> SAFE");
+      phase_ = enable_safe_ ? PHASE_SAFE : PHASE_MOVE;
+      safe_done_ = false;
+      move_initialized_ = false;
+      draw_initialized_ = false;
+      active_traj_valid_ = false;
       qdot_r_prev_valid_ = false;
       resetMarkerNewSegment();
+      return Vector6d::Zero();
     }
 
 
@@ -844,6 +1203,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
 // -------------------------
 // RViz/debug helpers
 // -------------------------
+// 功能：清除 RViz 中已发布的轨迹 Marker。
 void OperationalSpaceControl::publishDeleteAllMarkers()
 {
   visualization_msgs::Marker clear;
@@ -858,6 +1218,7 @@ void OperationalSpaceControl::publishDeleteAllMarkers()
   }
 }
 
+// 功能：开启新的轨迹段并重置 Marker 缓冲。
 void OperationalSpaceControl::resetMarkerNewSegment()
 {
   traj_marker_.id += 1;
@@ -871,6 +1232,7 @@ void OperationalSpaceControl::resetMarkerNewSegment()
   actual_traj_marker_.header.stamp = ros::Time::now();
 }
 
+// 功能：发布控制调试信息与关节力矩状态。
 void OperationalSpaceControl::publishControlDebug(
   double t_sec, const std::string &phase, const JointState &state, const Vector6d &tau_cmd)
 {
