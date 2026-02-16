@@ -152,6 +152,11 @@ install(TARGETS ${INS_TARGETS}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
+catkin_install_python(PROGRAMS
+  scripts/gripper_grasp_init.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
 foreach(dir launch)
     install(DIRECTORY ${dir}/
         DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/${dir})

@@ -31,13 +31,13 @@ operational_space_ctrl:
     offset_y: 0.839   # world Y offset (meters), tuned to keep first goal y near -0.65
 
   move:
-    time: 20.0
+    time: 10.0
     speed: 0.0         # m/s, <=0 means use move.time
     pos_tol: 0.01      # meters, position tolerance for early MOVE→DRAW switch
     ori_tol: 0.35      # radians, orientation tolerance for early MOVE→DRAW switch
 
   draw:
-    time: 20.0
+    time: 15.0
     speed: 0.0         # m/s, <=0 means use draw.time or length_world/speed
     use_fixed_z: true
     fixed_z: 0.09
