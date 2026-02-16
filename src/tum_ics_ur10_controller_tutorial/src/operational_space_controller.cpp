@@ -109,6 +109,7 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     px_scale_y_(-0.001),
     px_offset_x_(0.0),
     px_offset_y_(0.0),
+    px_rotation_deg_(90.0),
     draw_blend_ratio_(0.1),
     move_pos_tol_(0.01),
     move_ori_tol_(0.05),
@@ -270,6 +271,7 @@ bool OperationalSpaceControl::init()
   ros::param::get(ns + "/pixel_to_world/scale_y", px_scale_y_);
   ros::param::get(ns + "/pixel_to_world/offset_x", px_offset_x_);
   ros::param::get(ns + "/pixel_to_world/offset_y", px_offset_y_);
+  ros::param::get(ns + "/pixel_to_world/rotation_deg", px_rotation_deg_);
 
   // move position tolerance
   ros::param::get(ns + "/move/pos_tol", move_pos_tol_);
@@ -639,21 +641,23 @@ void OperationalSpaceControl::trajectoryCallback(const std_msgs::String::ConstPt
     const PlanarPolynomialTrajectory &traj = parsed[static_cast<size_t>(i)];
     const double x0_px = evalPoly(traj.coeff_x, 0.0);
     const double y0_px = evalPoly(traj.coeff_y, 0.0);
-    const double x0_w = x0_px * px_scale_x_ + px_offset_x_;
-    const double y0_w = y0_px * px_scale_y_ + px_offset_y_;
+    double x0_w, y0_w;
+    pixelToWorld(x0_px, y0_px, x0_w, y0_w);
 
     double len_w = 0.0;
     double t_prev = 0.0;
-    double dxdt_prev = evalPolyDerivative(traj.coeff_x, 0.0) * px_scale_x_;
-    double dydt_prev = evalPolyDerivative(traj.coeff_y, 0.0) * px_scale_y_;
-    double v_prev = std::sqrt(dxdt_prev * dxdt_prev + dydt_prev * dydt_prev);
+    double dxdt_prev_w, dydt_prev_w;
+    pixelVelToWorld(evalPolyDerivative(traj.coeff_x, 0.0), evalPolyDerivative(traj.coeff_y, 0.0),
+                    dxdt_prev_w, dydt_prev_w);
+    double v_prev = std::sqrt(dxdt_prev_w * dxdt_prev_w + dydt_prev_w * dydt_prev_w);
     for (int k = 1; k <= len_samples; ++k)
     {
       const double t = static_cast<double>(k) / static_cast<double>(len_samples);
       const double dt = t - t_prev;
-      const double dxdt = evalPolyDerivative(traj.coeff_x, t) * px_scale_x_;
-      const double dydt = evalPolyDerivative(traj.coeff_y, t) * px_scale_y_;
-      const double v = std::sqrt(dxdt * dxdt + dydt * dydt);
+      double dxdt_w, dydt_w;
+      pixelVelToWorld(evalPolyDerivative(traj.coeff_x, t), evalPolyDerivative(traj.coeff_y, t),
+                      dxdt_w, dydt_w);
+      const double v = std::sqrt(dxdt_w * dxdt_w + dydt_w * dydt_w);
       len_w += 0.5 * (v_prev + v) * dt;
       t_prev = t;
       v_prev = v;
@@ -699,9 +703,9 @@ void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPositi
 
   const double x0_px = evalPoly(traj.coeff_x, 0.0);
   const double y0_px = evalPoly(traj.coeff_y, 0.0);
-  move_goal_pos_ << x0_px * px_scale_x_ + px_offset_x_,
-                    y0_px * px_scale_y_ + px_offset_y_,
-                    active_draw_z_;
+  double goal_x_w, goal_y_w;
+  pixelToWorld(x0_px, y0_px, goal_x_w, goal_y_w);
+  move_goal_pos_ << goal_x_w, goal_y_w, active_draw_z_;
 
   active_traj_ = traj;
   active_traj_valid_ = true;
@@ -812,10 +816,10 @@ void OperationalSpaceControl::cartesianDesiredDraw(
   const double dx_dt_norm_px = evalPolyDerivative(active_traj_.coeff_x, t_norm);
   const double dy_dt_norm_px = evalPolyDerivative(active_traj_.coeff_y, t_norm);
 
+  double path_x_w, path_y_w;
+  pixelToWorld(x_px, y_px, path_x_w, path_y_w);
   cc::Vector3 X_path;
-  X_path << x_px * px_scale_x_ + px_offset_x_,
-            y_px * px_scale_y_ + px_offset_y_,
-            active_draw_z_;
+  X_path << path_x_w, path_y_w, active_draw_z_;
 
   // --- Force first DRAW point to exactly match MOVE goal ---
   if (t < 1e-6)   // first control tick after DRAW init
@@ -843,15 +847,44 @@ void OperationalSpaceControl::cartesianDesiredDraw(
       alpha_dot = (30.0 * r2 - 60.0 * r3 + 30.0 * r4) / T_blend;
       Xd = (1.0 - alpha) * X_start_ + alpha * X_path;
     }
-    Xdot_d(0) = alpha * dx_dt_norm_px * px_scale_x_ / T_draw
-              + alpha_dot * (X_path(0) - X_start_(0));
-    Xdot_d(1) = alpha * dy_dt_norm_px * px_scale_y_ / T_draw
-              + alpha_dot * (X_path(1) - X_start_(1));
+    double vel_x_w, vel_y_w;
+    pixelVelToWorld(dx_dt_norm_px / T_draw, dy_dt_norm_px / T_draw, vel_x_w, vel_y_w);
+    Xdot_d(0) = alpha * vel_x_w + alpha_dot * (X_path(0) - X_start_(0));
+    Xdot_d(1) = alpha * vel_y_w + alpha_dot * (X_path(1) - X_start_(1));
     Xdot_d(2) = alpha_dot * (X_path(2) - X_start_(2));
   }
 
   Rd = R_draw_;
   Wd.setZero();
+}
+
+// -------------------------
+// Pixel-to-world (with 90° CW rotation about z around offset center)
+// -------------------------
+// 功能：将像素坐标转换为世界坐标，并绕 z 轴顺时针旋转 px_rotation_deg_ 度。
+void OperationalSpaceControl::pixelToWorld(double x_px, double y_px, double &x_w, double &y_w) const
+{
+  // Step 1: standard pixel-to-world (centered, without offset)
+  const double xc = x_px * px_scale_x_;
+  const double yc = y_px * px_scale_y_;
+  // Step 2: rotate CW by px_rotation_deg_ about z (CW = negative angle in right-hand rule)
+  const double theta = -px_rotation_deg_ * M_PI / 180.0;
+  const double ct = std::cos(theta);
+  const double st = std::sin(theta);
+  x_w = ct * xc - st * yc + px_offset_x_;
+  y_w = st * xc + ct * yc + px_offset_y_;
+}
+
+// 功能：将像素速度转换为世界速度，并绕 z 轴顺时针旋转 px_rotation_deg_ 度。
+void OperationalSpaceControl::pixelVelToWorld(double dx_px, double dy_px, double &dx_w, double &dy_w) const
+{
+  const double dxc = dx_px * px_scale_x_;
+  const double dyc = dy_px * px_scale_y_;
+  const double theta = -px_rotation_deg_ * M_PI / 180.0;
+  const double ct = std::cos(theta);
+  const double st = std::sin(theta);
+  dx_w = ct * dxc - st * dyc;
+  dy_w = st * dxc + ct * dyc;
 }
 
 // -------------------------
@@ -1281,36 +1314,6 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
       tau(i) = std::max(-tau_max_, std::min(tau(i), tau_max_));
 
     publishControlDebug(t_sec, "MOVE", state, tau);
-
-    // trajectory markers (optional)
-    {
-      cc::Vector3 Xd, Xdot_d, Wd;
-      cc::Rotation3 Rd;
-      cartesianDesiredMove(t_sec, Xd, Xdot_d, Rd, Wd);
-
-      geometry_msgs::Point pd;
-      pd.x = Xd(0); pd.y = Xd(1); pd.z = Xd(2);
-      traj_points_.push_back(pd);
-
-      if (traj_points_.size() >= 2)
-      {
-        traj_marker_.points = traj_points_;
-        traj_marker_.header.stamp = ros::Time::now();
-        traj_pub_.publish(traj_marker_);
-      }
-
-      const cc::Vector3 X = fkPos(q6);
-      geometry_msgs::Point pa;
-      pa.x = X(0); pa.y = X(1); pa.z = X(2);
-      actual_traj_points_.push_back(pa);
-
-      if (actual_traj_points_.size() >= 2)
-      {
-        actual_traj_marker_.points = actual_traj_points_;
-        actual_traj_marker_.header.stamp = ros::Time::now();
-        actual_traj_pub_.publish(actual_traj_marker_);
-      }
-    }
 
     return tau;
   }
