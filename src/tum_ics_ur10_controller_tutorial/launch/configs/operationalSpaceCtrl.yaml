@@ -24,15 +24,22 @@ operational_space_ctrl:
     sigma: 0.02
     theta_hat_max: 200.0
 
+  pixel_to_world:
+    scale: 0.001      # meters per pixel (adjust to your setup)
+    offset_x: 0.0     # world X offset (meters)
+    offset_y: 0.0     # world Y offset (meters)
+
   move:
     time: 20.0
-    speed: 0.0    # m/s, <=0 means use move.time
+    speed: 0.0         # m/s, <=0 means use move.time
+    pos_tol: 0.01      # meters, position tolerance for early MOVE→DRAW switch
 
   draw:
     time: 20.0
-    speed: 0.0    # m/s, <=0 means use draw.time or length_px/speed
+    speed: 0.0         # m/s, <=0 means use draw.time or length_world/speed
     use_fixed_z: false
     fixed_z: 0.0
+    blend_ratio: 0.1   # fraction of T_draw for velocity ramp-up at DRAW start
 
   trajectory:
     topic: /ur10/planar_polynomial_trajectories  # std_msgs/String XML

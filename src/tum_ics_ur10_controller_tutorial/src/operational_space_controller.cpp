@@ -36,6 +36,11 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     draw_speed_(0.0),
     use_fixed_draw_z_(false),
     fixed_draw_z_(0.0),
+    px_to_m_(0.001),
+    px_offset_x_(0.0),
+    px_offset_y_(0.0),
+    draw_blend_ratio_(0.1),
+    move_pos_tol_(0.01),
     active_move_time_(20.0),
     active_draw_time_(20.0),
     active_draw_z_(0.0),
@@ -187,6 +192,15 @@ bool OperationalSpaceControl::init()
   ros::param::get(ns + "/draw/use_fixed_z", use_fixed_draw_z_);
   ros::param::get(ns + "/draw/fixed_z", fixed_draw_z_);
   if (draw_time_ <= 1e-3) draw_time_ = 20.0;
+  ros::param::get(ns + "/draw/blend_ratio", draw_blend_ratio_);
+
+  // pixel-to-world transform
+  ros::param::get(ns + "/pixel_to_world/scale", px_to_m_);
+  ros::param::get(ns + "/pixel_to_world/offset_x", px_offset_x_);
+  ros::param::get(ns + "/pixel_to_world/offset_y", px_offset_y_);
+
+  // move position tolerance
+  ros::param::get(ns + "/move/pos_tol", move_pos_tol_);
 
   // trajectory input
   ros::param::get(ns + "/trajectory/topic", traj_topic_);
@@ -212,19 +226,18 @@ bool OperationalSpaceControl::init()
     return false;
   }
 
-  // desired orientation in MOVE:
-  // tool z-axis -> +X (world), tool y-axis -> +Y, tool x-axis -> -Z (right-handed)
+  // desired orientation in MOVE/DRAW:
+  // tool z-axis -> -Z (world, pointing down), tool x -> +X, tool y -> -Y
+  // = 180° rotation about world X-axis, det=+1
   R_move_.setIdentity();
-  R_move_ << 0, 0, 1,
-             0, 1, 0,
-             1, 0, 0;
+  R_move_ <<  1,  0,  0,
+              0, -1,  0,
+              0,  0, -1;
 
-  // desired orientation in DRAW:
-  // tool z-axis -> +X (world), tool y-axis -> +Y, tool x-axis -> -Z (right-handed)
   R_draw_.setIdentity();
-  R_draw_ << 0, 0, 1,
-             0, 1, 0,
-             1, 0, 0;
+  R_draw_ <<  1,  0,  0,
+              0, -1,  0,
+              0,  0, -1;
 
   // init theta_hat from model initial guess
   theta_hat_ = model_.parameterInitalGuess();
@@ -574,9 +587,11 @@ void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPositi
   move_start_pos_ = fkPos(q6);
   active_draw_z_ = use_fixed_draw_z_ ? fixed_draw_z_ : move_start_pos_(2);
 
-  const double x0 = evalPoly(traj.coeff_x, 0.0);
-  const double y0 = evalPoly(traj.coeff_y, 0.0);
-  move_goal_pos_ << x0, y0, active_draw_z_;
+  const double x0_px = evalPoly(traj.coeff_x, 0.0);
+  const double y0_px = evalPoly(traj.coeff_y, 0.0);
+  move_goal_pos_ << x0_px * px_to_m_ + px_offset_x_,
+                    y0_px * px_to_m_ + px_offset_y_,
+                    active_draw_z_;
 
   active_traj_ = traj;
   active_traj_valid_ = true;
@@ -588,10 +603,11 @@ void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPositi
     active_move_time_ = std::max(1e-3, dist / move_speed_);
   }
 
+  const double length_m = active_traj_.length * px_to_m_;
   active_draw_time_ = std::max(1e-3, draw_time_);
-  if (draw_speed_ > 1e-6 && active_traj_.length > 1e-6)
+  if (draw_speed_ > 1e-6 && length_m > 1e-6)
   {
-    active_draw_time_ = std::max(1e-3, active_traj_.length / draw_speed_);
+    active_draw_time_ = std::max(1e-3, length_m / draw_speed_);
   }
 
   X_start_ = move_start_pos_;
@@ -677,18 +693,30 @@ void OperationalSpaceControl::cartesianDesiredDraw(
   double t_norm = t / T_draw;
   if (t_norm > 1.0) t_norm = 1.0;
 
-  const double x = evalPoly(active_traj_.coeff_x, t_norm);
-  const double y = evalPoly(active_traj_.coeff_y, t_norm);
-  const double dx_dt_norm = evalPolyDerivative(active_traj_.coeff_x, t_norm);
-  const double dy_dt_norm = evalPolyDerivative(active_traj_.coeff_y, t_norm);
+  const double x_px = evalPoly(active_traj_.coeff_x, t_norm);
+  const double y_px = evalPoly(active_traj_.coeff_y, t_norm);
+  const double dx_dt_norm_px = evalPolyDerivative(active_traj_.coeff_x, t_norm);
+  const double dy_dt_norm_px = evalPolyDerivative(active_traj_.coeff_y, t_norm);
 
-  Xd << x, y, active_draw_z_;
+  Xd << x_px * px_to_m_ + px_offset_x_,
+        y_px * px_to_m_ + px_offset_y_,
+        active_draw_z_;
 
   Xdot_d.setZero();
   if (t < T_draw)
   {
-    Xdot_d(0) = dx_dt_norm / T_draw;
-    Xdot_d(1) = dy_dt_norm / T_draw;
+    // smooth ramp from 0 over first draw_blend_ratio_ of T_draw
+    double alpha = 1.0;
+    const double T_blend = draw_blend_ratio_ * T_draw;
+    if (T_blend > 1e-6 && t < T_blend)
+    {
+      const double r = t / T_blend;
+      const double r2 = r * r;
+      const double r3 = r2 * r;
+      alpha = 10.0 * r3 - 15.0 * r3 * r + 6.0 * r3 * r2;
+    }
+    Xdot_d(0) = alpha * dx_dt_norm_px * px_to_m_ / T_draw;
+    Xdot_d(1) = alpha * dy_dt_norm_px * px_to_m_ / T_draw;
   }
 
   Rd = R_draw_;
@@ -981,8 +1009,11 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     if (!move_initialized_) return Vector6d::Zero();
 
     // ===== MOVE 完成判定 =====
-    double t_move = t_sec - t_move0_;
-    if (t_move >= active_move_time_)
+    const double t_move = t_sec - t_move0_;
+    const double move_pos_err = (fkPos(q6) - move_goal_pos_).norm();
+    const bool time_up = (t_move >= active_move_time_);
+    const bool converged_early = (t_move > 0.5 * active_move_time_ && move_pos_err < move_pos_tol_);
+    if (time_up || converged_early)
     {
       ROS_WARN_STREAM("[PHASE SWITCH] MOVE -> DRAW");
 

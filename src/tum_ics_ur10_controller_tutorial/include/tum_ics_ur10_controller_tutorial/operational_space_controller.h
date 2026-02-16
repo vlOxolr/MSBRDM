@@ -78,6 +78,17 @@ private:
   bool use_fixed_draw_z_;
   double fixed_draw_z_;
 
+  // ===== pixel-to-world transform =====
+  double px_to_m_;        // scale: meters per pixel
+  double px_offset_x_;    // world X offset (meters)
+  double px_offset_y_;    // world Y offset (meters)
+
+  // ===== MOVE→DRAW blend =====
+  double draw_blend_ratio_;
+
+  // ===== MOVE convergence =====
+  double move_pos_tol_;
+
   // active segment timing/path
   double active_move_time_;
   double active_draw_time_;
