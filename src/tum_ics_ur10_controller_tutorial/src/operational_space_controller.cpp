@@ -303,14 +303,14 @@ bool OperationalSpaceControl::init()
   // tool z-axis -> -Z (world, pointing down), tool x -> +X, tool y -> -Y
   // = 180° rotation about world X-axis, det=+1
   R_move_.setIdentity();
-  R_move_ <<  1,  0,  0,
-              0, -1,  0,
-              0,  0, -1;
+  R_move_ <<  0,  0,  1,
+              0,  1,  0,
+              1,  0,  0;
 
   R_draw_.setIdentity();
-  R_draw_ <<  1,  0,  0,
-              0, -1,  0,
-              0,  0, -1;
+  R_draw_ <<  0,  0,  1,
+              0,  1,  0,
+              1,  0,  0;
 
   // init theta_hat from model initial guess
   theta_hat_ = model_.parameterInitalGuess();
@@ -722,7 +722,7 @@ void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPositi
   }
 
   X_start_ = move_start_pos_;
-  R_move_start_ = projectToSO3(fkOri(q6));   // record current orientation for SLERP
+  R_move_ = projectToSO3(fkOri(q6));   // record current orientation for SLERP
   t_move0_ = t_sec;
   move_initialized_ = true;
   draw_initialized_ = false;
@@ -747,6 +747,7 @@ void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPositi
   X_start_ = fkPos(q6);
   if (!use_fixed_draw_z_) active_draw_z_ = X_start_(2);
   t_draw0_ = t_sec;
+  R_draw_ = projectToSO3(fkOri(q6));
   draw_initialized_ = true;
 
   ROS_WARN_STREAM("[OperationalSpaceControl] DRAW init: X_start=" << X_start_.transpose()
@@ -780,51 +781,8 @@ void OperationalSpaceControl::cartesianDesiredMove(
   Xd = move_start_pos_ + s * delta;
   Xdot_d = sdot * delta;
 
-  // SLERP orientation from R_move_start_ to R_move_ using same quintic s.
-  const Eigen::Quaterniond q0 = normalizedQuatFromRotation(R_move_start_);
-  Eigen::Quaterniond q1 = normalizedQuatFromRotation(R_move_);
-  if (q0.dot(q1) < 0.0) q1.coeffs() *= -1.0;  // shortest arc
-
-  Eigen::Quaterniond q_interp = q0.slerp(s, q1);
-  if (!isFiniteQuat(q_interp) || q_interp.norm() < kQuatNormEps)
-  {
-    q_interp = q0;
-  }
-  else
-  {
-    q_interp.normalize();
-  }
-  Rd = q_interp.toRotationMatrix();
-
-  // angular velocity: Wd = sdot * axis * angle, with angle~0 fallback.
-  Eigen::Quaterniond q_delta = q0.conjugate() * q1;
-  if (!isFiniteQuat(q_delta) || q_delta.norm() < kQuatNormEps)
-  {
-    Wd.setZero();
-    return;
-  }
-
-  q_delta.normalize();
-  if (q_delta.w() < 0.0) q_delta.coeffs() *= -1.0;
-
-  const Eigen::Vector3d v = q_delta.vec();
-  const double sin_half = v.norm();
-  const double cos_half = std::max(-1.0, std::min(1.0, q_delta.w()));
-  if (!std::isfinite(sin_half) || !std::isfinite(cos_half) || sin_half < kSmallAngleEps)
-  {
-    Wd.setZero();
-    return;
-  }
-
-  const double angle = 2.0 * std::atan2(sin_half, cos_half);
-  const Eigen::Vector3d axis = v / sin_half;
-  if (!std::isfinite(angle) || !isFiniteVec3(axis))
-  {
-    Wd.setZero();
-    return;
-  }
-
-  Wd = sdot * angle * axis;
+  Rd = R_move_;
+  Wd.setZero();
 }
 
 // -------------------------
@@ -858,6 +816,12 @@ void OperationalSpaceControl::cartesianDesiredDraw(
   X_path << x_px * px_scale_x_ + px_offset_x_,
             y_px * px_scale_y_ + px_offset_y_,
             active_draw_z_;
+
+  // --- Force first DRAW point to exactly match MOVE goal ---
+  if (t < 1e-6)   // first control tick after DRAW init
+  {
+      X_path = move_goal_pos_;
+  }
 
   Xdot_d.setZero();
   Xd = X_path;
@@ -995,6 +959,16 @@ OperationalSpaceControl::computeQdotR_MOVE_and_DRAW(double t_sec, const cc::Join
 
   Vector6d xdot_r6 = xdot_d6 + Kp6 * e;
 
+  if (phase_ == PHASE_MOVE) 
+  {
+    xdot_r6.tail<3>().setZero();
+  }
+
+  if (phase_ == PHASE_DRAW) 
+  {
+    xdot_r6.tail<3>().setZero();
+  }
+
   // clamp (optional safety)
   for (int i = 0; i < 3; ++i)
     xdot_r6(i) = std::max(-xdot_r_max_, std::min(xdot_r6(i), xdot_r_max_));
@@ -1018,7 +992,7 @@ OperationalSpaceControl::computeQdotR_MOVE_and_DRAW(double t_sec, const cc::Join
   double wdot_norm     = xdot_r6.tail<3>().norm();
 
   ROS_INFO_STREAM_THROTTLE(1.0,
-    "[MOVE/DRAW DEBUG] "
+    "[MOVE/DRAW DEBUG][" << (phase_==PHASE_MOVE?"MOVE":"DRAW") << "] "
     << "condJ=" << condJ
     << " sigma_min=" << sigma_min
     << " e_pos=" << e_pos_norm
@@ -1208,7 +1182,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     const Eigen::Quaterniond q_cur = normalizedQuatFromRotation(R_cur);
     const double move_ori_err = quaternionAngularDistance(q_des, q_cur);
 
-    const bool pose_converged = (move_pos_err < move_pos_tol_ && move_ori_err < move_ori_tol_);
+    const bool pose_converged = (move_pos_err < move_pos_tol_);
     const bool time_up = (t_move >= active_move_time_);
     const bool converged_early = (t_move > 0.5 * active_move_time_ && pose_converged);
     const bool hard_timeout = (t_move >= kMoveHardTimeoutFactor * active_move_time_);
@@ -1260,6 +1234,13 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     Vector6d qddot_r = Vector6d::Zero();
     if (qdot_r_prev_valid_ && dt > 1e-6)
       qddot_r = (qdot_r - qdot_r_prev6_) / dt;
+      ROS_WARN_STREAM_THROTTLE(0.1,
+        "[REF DEBUG][MOVE] "
+        << "|qdot_r|=" << qdot_r.norm()
+        << " |qddot_r|=" << qddot_r.norm()
+        << " dt=" << dt
+        << " qdot_r_prev_valid=" << (qdot_r_prev_valid_ ? 1 : 0)
+      );
     qdot_r_prev6_ = qdot_r;
     qdot_r_prev_valid_ = true;
 
@@ -1386,6 +1367,13 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     Vector6d qddot_r = Vector6d::Zero();
     if (qdot_r_prev_valid_ && dt > 1e-6)
       qddot_r = (qdot_r - qdot_r_prev6_) / dt;
+      ROS_WARN_STREAM_THROTTLE(0.1,
+        "[REF DEBUG][MOVE] "
+        << "|qdot_r|=" << qdot_r.norm()
+        << " |qddot_r|=" << qddot_r.norm()
+        << " dt=" << dt
+        << " qdot_r_prev_valid=" << (qdot_r_prev_valid_ ? 1 : 0)
+      );
     qdot_r_prev6_ = qdot_r;
     qdot_r_prev_valid_ = true;
 
@@ -1421,14 +1409,14 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     tau = (-Kd6_) * s + tau_ff;
 
     // Soften MOVE->DRAW transition: blend from pure damping to full DRAW torque.
-    if (t_draw < kDrawTorqueRampTime)
-    {
-      const double beta = smoothStepQuintic01(t_draw / kDrawTorqueRampTime);
-      Vector6d tau_damp = (-Kd_safe6_) * qP6;
-      for (int i = 0; i < 6; ++i)
-        tau_damp(i) = std::max(-tau_max_, std::min(tau_damp(i), tau_max_));
-      tau = (1.0 - beta) * tau_damp + beta * tau;
-    }
+    // if (t_draw < kDrawTorqueRampTime)
+    // {
+    //   const double beta = smoothStepQuintic01(t_draw / kDrawTorqueRampTime);
+    //   Vector6d tau_damp = (-Kd_safe6_) * qP6;
+    //   for (int i = 0; i < 6; ++i)
+    //     tau_damp(i) = std::max(-tau_max_, std::min(tau_damp(i), tau_max_));
+    //   tau = (1.0 - beta) * tau_damp + beta * tau;
+    // }
 
     applyVelocityGuard(tau, "DRAW");
 
