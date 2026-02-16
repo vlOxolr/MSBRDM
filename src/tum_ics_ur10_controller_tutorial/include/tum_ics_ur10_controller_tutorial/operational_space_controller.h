@@ -83,6 +83,7 @@ private:
   double px_scale_y_;     // meters per pixel-row (negative to flip Y)
   double px_offset_x_;    // world X offset (meters)
   double px_offset_y_;    // world Y offset (meters)
+  double px_rotation_deg_;  // rotation about z-axis in degrees (CW positive)
 
   // ===== MOVE→DRAW blend =====
   double draw_blend_ratio_;
@@ -204,6 +205,10 @@ private:
   cc::Vector3 fkPos(const cc::JointPosition &q6) const;
   cc::Rotation3 fkOri(const cc::JointPosition &q6) const;
   Matrix6d jacobian6(const cc::JointPosition &q6) const;
+
+  // pixel-to-world conversion (with 90° CW rotation about z)
+  void pixelToWorld(double x_px, double y_px, double &x_w, double &y_w) const;
+  void pixelVelToWorld(double dx_px, double dy_px, double &dx_w, double &dy_w) const;
 
   // Damped Least Squares
   static Vector6d dlsSolve6(const Matrix6d &J, const Vector6d &xdot, double lambda = 0.05);
