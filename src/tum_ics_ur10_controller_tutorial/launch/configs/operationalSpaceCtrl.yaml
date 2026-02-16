@@ -10,10 +10,10 @@ operational_space_ctrl:
   Kd_safe: [5, 30, 40, 10, 10, 5]
 
   Kp_pos: [15, 15, 15]
-  Kp_ori: [0.3, 0.5, 0.5]
+  Kp_ori: [0.1, 0.1, 0.2]
   Kd:      [12, 12, 8, 4, 4, 4]  #DRAW phase: tau = -Kd_ * s + Y * theta_hat_;
 
-  tau_max: 120.0
+  tau_max: 90.0
   qdot_r_max: 2.0
   xdot_r_max: 0.25
   wdot_r_max: 0.80
@@ -25,14 +25,16 @@ operational_space_ctrl:
     theta_hat_max: 200.0
 
   pixel_to_world:
-    scale: 0.001      # meters per pixel (adjust to your setup)
-    offset_x: 0.0     # world X offset (meters)
-    offset_y: 0.0     # world Y offset (meters)
+    scale_x:  0.0007  # meters per pixel-col → world X (negative to flip)
+    scale_y: -0.0007  # meters per pixel-row → world Y (negative: image-down → world-up)
+    offset_x: 0.35    # world X offset (meters)
+    offset_y: 0.839   # world Y offset (meters), tuned to keep first goal y near -0.65
 
   move:
     time: 20.0
     speed: 0.0         # m/s, <=0 means use move.time
     pos_tol: 0.01      # meters, position tolerance for early MOVE→DRAW switch
+    ori_tol: 0.35      # radians, orientation tolerance for early MOVE→DRAW switch
 
   draw:
     time: 20.0

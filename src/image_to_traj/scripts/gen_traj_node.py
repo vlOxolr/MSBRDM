@@ -93,12 +93,12 @@ def main():
     rospy.init_node("trajectory_generator_node", anonymous=False)
 
     # Publish XML as a latched topic so late subscribers still receive it
-    pub = rospy.Publisher("/strokes", String, queue_size=1, latch=True)
+    pub = rospy.Publisher("/ur10/planar_polynomial_trajectories", String, queue_size=1, latch=True)
 
     msg = String()
     msg.data = xml_str
     pub.publish(msg)
-    rospy.loginfo(f"Published strokes XML to /strokes (bytes={len(xml_str.encode('utf-8'))})")
+    rospy.loginfo(f"Published strokes XML to /ur10/planar_polynomial_trajectories (bytes={len(xml_str.encode('utf-8'))})")
 
 
     if args.xml_out:

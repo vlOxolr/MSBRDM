@@ -15,6 +15,75 @@ namespace tum_ics_ur_robot_lli
 namespace RobotControllers
 {
 
+namespace
+{
+constexpr double kQuatNormEps = 1e-12;
+constexpr double kSmallAngleEps = 1e-8;
+constexpr double kMoveHardTimeoutFactor = 2.0;
+constexpr double kJointVelGuardThreshold = 35.0;
+constexpr double kDrawTorqueRampTime = 0.5;
+
+bool isFiniteVec3(const Eigen::Vector3d &v)
+{
+  return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
+}
+
+bool isFiniteQuat(const Eigen::Quaterniond &q)
+{
+  return std::isfinite(q.w()) && std::isfinite(q.x())
+      && std::isfinite(q.y()) && std::isfinite(q.z());
+}
+
+double smoothStepQuintic01(double x)
+{
+  const double u = std::max(0.0, std::min(1.0, x));
+  const double u2 = u * u;
+  const double u3 = u2 * u;
+  const double u4 = u3 * u;
+  const double u5 = u4 * u;
+  return 10.0 * u3 - 15.0 * u4 + 6.0 * u5;
+}
+
+cc::Rotation3 projectToSO3(const cc::Rotation3 &R_in)
+{
+  const Eigen::Matrix3d R_raw = R_in;
+  Eigen::JacobiSVD<Eigen::Matrix3d> svd(R_raw, Eigen::ComputeFullU | Eigen::ComputeFullV);
+
+  Eigen::Matrix3d U = svd.matrixU();
+  const Eigen::Matrix3d V = svd.matrixV();
+  Eigen::Matrix3d R = U * V.transpose();
+
+  if (R.determinant() < 0.0)
+  {
+    U.col(2) *= -1.0;
+    R = U * V.transpose();
+  }
+
+  return R;
+}
+
+Eigen::Quaterniond normalizedQuatFromRotation(const cc::Rotation3 &R_in)
+{
+  const cc::Rotation3 R = projectToSO3(R_in);
+  Eigen::Quaterniond q(R);
+  if (!isFiniteQuat(q)) return Eigen::Quaterniond::Identity();
+
+  const double n = q.norm();
+  if (!std::isfinite(n) || n < kQuatNormEps) return Eigen::Quaterniond::Identity();
+
+  q.coeffs() /= n;
+  if (q.w() < 0.0) q.coeffs() *= -1.0;
+  return q;
+}
+
+double quaternionAngularDistance(const Eigen::Quaterniond &qa, const Eigen::Quaterniond &qb)
+{
+  double dot = std::abs(qa.dot(qb));
+  dot = std::max(-1.0, std::min(1.0, dot));
+  return 2.0 * std::acos(dot);
+}
+}  // namespace
+
 // 功能：构造控制器并初始化全部成员变量与默认参数。
 OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &name)
   : ControlEffort(name, SPLINE_TYPE, JOINT_SPACE, weight),
@@ -36,11 +105,13 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     draw_speed_(0.0),
     use_fixed_draw_z_(false),
     fixed_draw_z_(0.0),
-    px_to_m_(0.001),
+    px_scale_x_(0.001),
+    px_scale_y_(-0.001),
     px_offset_x_(0.0),
     px_offset_y_(0.0),
     draw_blend_ratio_(0.1),
     move_pos_tol_(0.01),
+    move_ori_tol_(0.05),
     active_move_time_(20.0),
     active_draw_time_(20.0),
     active_draw_z_(0.0),
@@ -195,12 +266,14 @@ bool OperationalSpaceControl::init()
   ros::param::get(ns + "/draw/blend_ratio", draw_blend_ratio_);
 
   // pixel-to-world transform
-  ros::param::get(ns + "/pixel_to_world/scale", px_to_m_);
+  ros::param::get(ns + "/pixel_to_world/scale_x", px_scale_x_);
+  ros::param::get(ns + "/pixel_to_world/scale_y", px_scale_y_);
   ros::param::get(ns + "/pixel_to_world/offset_x", px_offset_x_);
   ros::param::get(ns + "/pixel_to_world/offset_y", px_offset_y_);
 
   // move position tolerance
   ros::param::get(ns + "/move/pos_tol", move_pos_tol_);
+  ros::param::get(ns + "/move/ori_tol", move_ori_tol_);
 
   // trajectory input
   ros::param::get(ns + "/trajectory/topic", traj_topic_);
@@ -539,8 +612,12 @@ void OperationalSpaceControl::trajectoryCallback(const std_msgs::String::ConstPt
 
     PlanarPolynomialTrajectory traj;
     traj.length = std::max(0.0, length_px);
+    // XML coefficients are descending (a_n, ..., a_0) from np.polyfit;
+    // evalPoly expects ascending (a_0, a_1, ..., a_n), so reverse.
     traj.coeff_x.assign(coeff_x.begin(), coeff_x.begin() + needed_size);
+    std::reverse(traj.coeff_x.begin(), traj.coeff_x.end());
     traj.coeff_y.assign(coeff_y.begin(), coeff_y.begin() + needed_size);
+    std::reverse(traj.coeff_y.begin(), traj.coeff_y.end());
 
     parsed[static_cast<size_t>(stroke_index)] = std::move(traj);
     parsed_mask[static_cast<size_t>(stroke_index)] = true;
@@ -553,6 +630,39 @@ void OperationalSpaceControl::trajectoryCallback(const std_msgs::String::ConstPt
       ROS_ERROR_STREAM("[OperationalSpaceControl] trajectoryCallback: missing stroke index " << i);
       return;
     }
+  }
+
+  // Log mapped start point and mapped length (in world XY) for each trajectory.
+  const int len_samples = 200;
+  for (int i = 0; i < n_traj; ++i)
+  {
+    const PlanarPolynomialTrajectory &traj = parsed[static_cast<size_t>(i)];
+    const double x0_px = evalPoly(traj.coeff_x, 0.0);
+    const double y0_px = evalPoly(traj.coeff_y, 0.0);
+    const double x0_w = x0_px * px_scale_x_ + px_offset_x_;
+    const double y0_w = y0_px * px_scale_y_ + px_offset_y_;
+
+    double len_w = 0.0;
+    double t_prev = 0.0;
+    double dxdt_prev = evalPolyDerivative(traj.coeff_x, 0.0) * px_scale_x_;
+    double dydt_prev = evalPolyDerivative(traj.coeff_y, 0.0) * px_scale_y_;
+    double v_prev = std::sqrt(dxdt_prev * dxdt_prev + dydt_prev * dydt_prev);
+    for (int k = 1; k <= len_samples; ++k)
+    {
+      const double t = static_cast<double>(k) / static_cast<double>(len_samples);
+      const double dt = t - t_prev;
+      const double dxdt = evalPolyDerivative(traj.coeff_x, t) * px_scale_x_;
+      const double dydt = evalPolyDerivative(traj.coeff_y, t) * px_scale_y_;
+      const double v = std::sqrt(dxdt * dxdt + dydt * dydt);
+      len_w += 0.5 * (v_prev + v) * dt;
+      t_prev = t;
+      v_prev = v;
+    }
+
+    ROS_INFO_STREAM("[TRAJ MAP] idx=" << i
+                    << " start_world_xy=(" << x0_w << ", " << y0_w << ")"
+                    << " length_world=" << len_w << " m"
+                    << " length_px=" << traj.length);
   }
 
   {
@@ -589,8 +699,8 @@ void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPositi
 
   const double x0_px = evalPoly(traj.coeff_x, 0.0);
   const double y0_px = evalPoly(traj.coeff_y, 0.0);
-  move_goal_pos_ << x0_px * px_to_m_ + px_offset_x_,
-                    y0_px * px_to_m_ + px_offset_y_,
+  move_goal_pos_ << x0_px * px_scale_x_ + px_offset_x_,
+                    y0_px * px_scale_y_ + px_offset_y_,
                     active_draw_z_;
 
   active_traj_ = traj;
@@ -603,7 +713,8 @@ void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPositi
     active_move_time_ = std::max(1e-3, dist / move_speed_);
   }
 
-  const double length_m = active_traj_.length * px_to_m_;
+  const double avg_scale = 0.5 * (std::abs(px_scale_x_) + std::abs(px_scale_y_));
+  const double length_m = active_traj_.length * avg_scale;
   active_draw_time_ = std::max(1e-3, draw_time_);
   if (draw_speed_ > 1e-6 && length_m > 1e-6)
   {
@@ -611,6 +722,7 @@ void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPositi
   }
 
   X_start_ = move_start_pos_;
+  R_move_start_ = projectToSO3(fkOri(q6));   // record current orientation for SLERP
   t_move0_ = t_sec;
   move_initialized_ = true;
   draw_initialized_ = false;
@@ -633,6 +745,7 @@ void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPositi
   }
 
   X_start_ = fkPos(q6);
+  if (!use_fixed_draw_z_) active_draw_z_ = X_start_(2);
   t_draw0_ = t_sec;
   draw_initialized_ = true;
 
@@ -667,8 +780,51 @@ void OperationalSpaceControl::cartesianDesiredMove(
   Xd = move_start_pos_ + s * delta;
   Xdot_d = sdot * delta;
 
-  Rd = R_move_;
-  Wd.setZero();
+  // SLERP orientation from R_move_start_ to R_move_ using same quintic s.
+  const Eigen::Quaterniond q0 = normalizedQuatFromRotation(R_move_start_);
+  Eigen::Quaterniond q1 = normalizedQuatFromRotation(R_move_);
+  if (q0.dot(q1) < 0.0) q1.coeffs() *= -1.0;  // shortest arc
+
+  Eigen::Quaterniond q_interp = q0.slerp(s, q1);
+  if (!isFiniteQuat(q_interp) || q_interp.norm() < kQuatNormEps)
+  {
+    q_interp = q0;
+  }
+  else
+  {
+    q_interp.normalize();
+  }
+  Rd = q_interp.toRotationMatrix();
+
+  // angular velocity: Wd = sdot * axis * angle, with angle~0 fallback.
+  Eigen::Quaterniond q_delta = q0.conjugate() * q1;
+  if (!isFiniteQuat(q_delta) || q_delta.norm() < kQuatNormEps)
+  {
+    Wd.setZero();
+    return;
+  }
+
+  q_delta.normalize();
+  if (q_delta.w() < 0.0) q_delta.coeffs() *= -1.0;
+
+  const Eigen::Vector3d v = q_delta.vec();
+  const double sin_half = v.norm();
+  const double cos_half = std::max(-1.0, std::min(1.0, q_delta.w()));
+  if (!std::isfinite(sin_half) || !std::isfinite(cos_half) || sin_half < kSmallAngleEps)
+  {
+    Wd.setZero();
+    return;
+  }
+
+  const double angle = 2.0 * std::atan2(sin_half, cos_half);
+  const Eigen::Vector3d axis = v / sin_half;
+  if (!std::isfinite(angle) || !isFiniteVec3(axis))
+  {
+    Wd.setZero();
+    return;
+  }
+
+  Wd = sdot * angle * axis;
 }
 
 // -------------------------
@@ -698,25 +854,36 @@ void OperationalSpaceControl::cartesianDesiredDraw(
   const double dx_dt_norm_px = evalPolyDerivative(active_traj_.coeff_x, t_norm);
   const double dy_dt_norm_px = evalPolyDerivative(active_traj_.coeff_y, t_norm);
 
-  Xd << x_px * px_to_m_ + px_offset_x_,
-        y_px * px_to_m_ + px_offset_y_,
-        active_draw_z_;
+  cc::Vector3 X_path;
+  X_path << x_px * px_scale_x_ + px_offset_x_,
+            y_px * px_scale_y_ + px_offset_y_,
+            active_draw_z_;
 
   Xdot_d.setZero();
+  Xd = X_path;
   if (t < T_draw)
   {
-    // smooth ramp from 0 over first draw_blend_ratio_ of T_draw
+    // smooth ramp from 0 over first draw_blend_ratio_ of T_draw.
+    // During this window, blend desired position from current X_start_ to path
+    // to avoid a position step right after MOVE->DRAW transition.
     double alpha = 1.0;
+    double alpha_dot = 0.0;
     const double T_blend = draw_blend_ratio_ * T_draw;
     if (T_blend > 1e-6 && t < T_blend)
     {
       const double r = t / T_blend;
       const double r2 = r * r;
       const double r3 = r2 * r;
+      const double r4 = r3 * r;
       alpha = 10.0 * r3 - 15.0 * r3 * r + 6.0 * r3 * r2;
+      alpha_dot = (30.0 * r2 - 60.0 * r3 + 30.0 * r4) / T_blend;
+      Xd = (1.0 - alpha) * X_start_ + alpha * X_path;
     }
-    Xdot_d(0) = alpha * dx_dt_norm_px * px_to_m_ / T_draw;
-    Xdot_d(1) = alpha * dy_dt_norm_px * px_to_m_ / T_draw;
+    Xdot_d(0) = alpha * dx_dt_norm_px * px_scale_x_ / T_draw
+              + alpha_dot * (X_path(0) - X_start_(0));
+    Xdot_d(1) = alpha * dy_dt_norm_px * px_scale_y_ / T_draw
+              + alpha_dot * (X_path(1) - X_start_(1));
+    Xdot_d(2) = alpha_dot * (X_path(2) - X_start_(2));
   }
 
   Rd = R_draw_;
@@ -743,7 +910,7 @@ cc::Rotation3 OperationalSpaceControl::fkOri(const cc::JointPosition &q6) const
   const cc::HomogeneousTransformation T_0_B = model_.T_0_B();
   const cc::HomogeneousTransformation T_tool_0 = model_.T_tool_0(q6);
   const cc::HomogeneousTransformation T = T_0_B * T_tool_0;
-  return T.orientation();
+  return projectToSO3(T.orientation());
 }
 
 // 功能：计算并转换到世界系的 6x6 雅可比矩阵。
@@ -805,7 +972,8 @@ OperationalSpaceControl::computeQdotR_MOVE_and_DRAW(double t_sec, const cc::Join
   // current
   const cc::HomogeneousTransformation T_0_B = model_.T_0_B();
   const cc::HomogeneousTransformation T_tool_0 = model_.T_tool_0(q6);
-  const cc::HomogeneousTransformation T = T_0_B * T_tool_0;
+  cc::HomogeneousTransformation T = T_0_B * T_tool_0;
+  T.orientation() = projectToSO3(T.orientation());
 
   // desired transform
   cc::HomogeneousTransformation Td = cc::HomogeneousTransformation::Identity();
@@ -889,6 +1057,23 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
   const cc::JointPosition q6 = state.q;
   const cc::JointVelocity qP6 = state.qp;
 
+  auto applyVelocityGuard = [&](Vector6d &tau_cmd, const char *phase_name)
+  {
+    const double qp_abs_max = qP6.cwiseAbs().maxCoeff();
+    if (!std::isfinite(qp_abs_max) || qp_abs_max <= kJointVelGuardThreshold) return;
+
+    tau_cmd = (-Kd_safe6_) * qP6;
+    for (int i = 0; i < 6; ++i)
+      tau_cmd(i) = std::max(-tau_max_, std::min(tau_cmd(i), tau_max_));
+
+    qdot_r_prev_valid_ = false;
+    ROS_ERROR_STREAM_THROTTLE(
+      0.5,
+      "[VEL GUARD][" << phase_name << "] |qp|max=" << qp_abs_max
+      << " > " << kJointVelGuardThreshold
+      << ", override tau with damping.");
+  };
+
   double dt = t_sec - prev_time_sec_;
   if (prev_time_sec_ <= 0.0 || !std::isfinite(dt) || dt <= 0.0) dt = 1e-3;
   prev_time_sec_ = t_sec;
@@ -933,7 +1118,11 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
         active_traj_valid_ = false;
         qdot_r_prev_valid_ = false; // avoid qddot spike on transition
         resetMarkerNewSegment();
-        return Vector6d::Zero();
+
+        Vector6d tau_bridge = (-Kd_safe6_) * qP6;
+        for (int i = 0; i < 6; ++i)
+          tau_bridge(i) = std::max(-tau_max_, std::min(tau_bridge(i), tau_max_));
+        return tau_bridge;
       }
     }
     else
@@ -989,6 +1178,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     for (int i = 0; i < 6; ++i)
       tau(i) = std::max(-tau_max_, std::min(tau(i), tau_max_));
 
+    applyVelocityGuard(tau, "SAFE");
     publishControlDebug(t_sec, "SAFE", state, tau);
     return tau;
   }
@@ -1011,17 +1201,51 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     // ===== MOVE 完成判定 =====
     const double t_move = t_sec - t_move0_;
     const double move_pos_err = (fkPos(q6) - move_goal_pos_).norm();
+
+    // orientation error: angle between current and desired R_move_
+    const cc::Rotation3 R_cur = fkOri(q6);
+    const Eigen::Quaterniond q_des = normalizedQuatFromRotation(R_move_);
+    const Eigen::Quaterniond q_cur = normalizedQuatFromRotation(R_cur);
+    const double move_ori_err = quaternionAngularDistance(q_des, q_cur);
+
+    const bool pose_converged = (move_pos_err < move_pos_tol_ && move_ori_err < move_ori_tol_);
     const bool time_up = (t_move >= active_move_time_);
-    const bool converged_early = (t_move > 0.5 * active_move_time_ && move_pos_err < move_pos_tol_);
-    if (time_up || converged_early)
+    const bool converged_early = (t_move > 0.5 * active_move_time_ && pose_converged);
+    const bool hard_timeout = (t_move >= kMoveHardTimeoutFactor * active_move_time_);
+
+    ROS_INFO_STREAM_THROTTLE(2.0,
+      "[MOVE CONV] e_pos=" << move_pos_err << " e_ori=" << move_ori_err
+      << " pos_tol=" << move_pos_tol_ << " ori_tol=" << move_ori_tol_);
+
+    if (time_up && !pose_converged)
     {
-      ROS_WARN_STREAM("[PHASE SWITCH] MOVE -> DRAW");
+      ROS_WARN_STREAM_THROTTLE(
+        1.0,
+        "[MOVE HOLD] time_up but pose not converged: e_pos=" << move_pos_err
+        << " e_ori=" << move_ori_err << ", holding MOVE.");
+    }
+
+    if (converged_early || hard_timeout)
+    {
+      if (hard_timeout && !pose_converged)
+      {
+        ROS_WARN_STREAM("[MOVE FORCE SWITCH] hard timeout reached at t=" << t_move
+                        << "s, e_pos=" << move_pos_err << " e_ori=" << move_ori_err);
+      }
+
+      ROS_WARN_STREAM("[PHASE SWITCH] MOVE -> DRAW (e_pos=" << move_pos_err
+                      << " e_ori=" << move_ori_err << ")");
 
       phase_ = PHASE_DRAW;
       draw_initialized_ = false;
       qdot_r_prev_valid_ = false;   // 避免 qddot_r 突变
       resetMarkerNewSegment();
-      return Vector6d::Zero();      // 当前周期先不输出旧控制
+
+      // 过渡周期：用纯阻尼减速，而非零力矩（避免自由漂移一个周期）
+      Vector6d tau_bridge = (-Kd6_) * qP6;
+      for (int i = 0; i < 6; ++i)
+        tau_bridge(i) = std::max(-tau_max_, std::min(tau_bridge(i), tau_max_));
+      return tau_bridge;
     }
 
     // qdot_r from task ref (pos + ori lock)
@@ -1069,6 +1293,8 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     }
 
     tau = (-Kd6_) * s + tau_ff;
+
+    applyVelocityGuard(tau, "MOVE");
 
     for (int i = 0; i < 6; ++i)
       tau(i) = std::max(-tau_max_, std::min(tau(i), tau_max_));
@@ -1140,7 +1366,11 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
       active_traj_valid_ = false;
       qdot_r_prev_valid_ = false;
       resetMarkerNewSegment();
-      return Vector6d::Zero();
+
+      Vector6d tau_bridge = (-Kd6_) * qP6;
+      for (int i = 0; i < 6; ++i)
+        tau_bridge(i) = std::max(-tau_max_, std::min(tau_bridge(i), tau_max_));
+      return tau_bridge;
     }
 
 
@@ -1189,6 +1419,18 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     }
 
     tau = (-Kd6_) * s + tau_ff;
+
+    // Soften MOVE->DRAW transition: blend from pure damping to full DRAW torque.
+    if (t_draw < kDrawTorqueRampTime)
+    {
+      const double beta = smoothStepQuintic01(t_draw / kDrawTorqueRampTime);
+      Vector6d tau_damp = (-Kd_safe6_) * qP6;
+      for (int i = 0; i < 6; ++i)
+        tau_damp(i) = std::max(-tau_max_, std::min(tau_damp(i), tau_max_));
+      tau = (1.0 - beta) * tau_damp + beta * tau;
+    }
+
+    applyVelocityGuard(tau, "DRAW");
 
     for (int i = 0; i < 6; ++i)
       tau(i) = std::max(-tau_max_, std::min(tau(i), tau_max_));

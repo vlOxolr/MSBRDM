@@ -79,7 +79,8 @@ private:
   double fixed_draw_z_;
 
   // ===== pixel-to-world transform =====
-  double px_to_m_;        // scale: meters per pixel
+  double px_scale_x_;     // meters per pixel-col (negative to flip X)
+  double px_scale_y_;     // meters per pixel-row (negative to flip Y)
   double px_offset_x_;    // world X offset (meters)
   double px_offset_y_;    // world Y offset (meters)
 
@@ -88,6 +89,7 @@ private:
 
   // ===== MOVE convergence =====
   double move_pos_tol_;
+  double move_ori_tol_;
 
   // active segment timing/path
   double active_move_time_;
@@ -103,6 +105,7 @@ private:
   double t_move0_;
   cc::Vector3 X_start_;     // fixed x,z and y start
   cc::Rotation3 R_move_;    // desired orientation in MOVE (tool z -> +X)
+  cc::Rotation3 R_move_start_;  // orientation at MOVE init (for SLERP interpolation)
 
   // draw timing & start pose
   bool draw_initialized_;
