@@ -3,7 +3,7 @@ operational_space_ctrl:
   enable_move: true
   enable_draw: true
 
-  safe_tol: 0.04
+  safe_tol: 0.05
   q_safe: [0.001, -0.8998, 1.2470, -1.9591, -1.56276, 0.8]  # q_safe: [0, -0.7, 0.7, -1, 0.3, 1]
 
   Kp_safe: [5,  1, 1, 0.2, 0.2, 1]
@@ -25,10 +25,10 @@ operational_space_ctrl:
     theta_hat_max: 200.0
 
   pixel_to_world:
-    scale_x:  0.0001  # meters per pixel-col → world X (negative to flip)
-    scale_y: -0.0001  # meters per pixel-row → world Y (negative: image-down → world-up)
-    offset_x: 0.75    # world X offset (meters)
-    offset_y: 0.339   # world Y offset (meters), tuned to keep first goal y near -0.65
+    scale_x:  0.0002  # meters per pixel-col → world X (negative to flip)
+    scale_y: -0.0002  # meters per pixel-row → world Y (negative: image-down → world-up)
+    offset_x: 1.2    # world X offset (meters)
+    offset_y: 0.239   # world Y offset (meters), tuned to keep first goal y near -0.65
     rotation_deg: 90.0  # CW rotation about z-axis (degrees), 0=no rotation
 
   move:
@@ -41,7 +41,7 @@ operational_space_ctrl:
     time: 20.0
     speed: 0.0         # m/s, <=0 means use draw.time or length_world/speed
     use_fixed_z: true
-    fixed_z: 0.09
+    fixed_z: 0.0805
     blend_ratio: 0.1   # fraction of T_draw for velocity ramp-up at DRAW start
 
   trajectory:
