@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 from skimage.io import imread
 from skimage.color import rgb2gray
 
-# trajectory_generator.py 同目录
+# the same catalogue as trajectory_generator.py
 from trajectory_generator import TrajectoryGenerator
 
 import rospy
@@ -85,7 +85,7 @@ def main():
 
     gen = TrajectoryGenerator()
 
-    # 1) 只跑一次：生成 XML
+    # 1) only run once to generate the XML
     xml_str = gen.generate_xml(args.image)
     print(xml_str)
 
@@ -107,7 +107,7 @@ def main():
             f.write(xml_str)
         print(f"[INFO] XML saved to: {args.xml_out}")
 
-    # 2) 解析 XML 拿拟合参数 + 长度
+    # 2) analyze XML to get fitting parameters + length
     strokes = parse_xml_trajectory(xml_str)
     if len(strokes) == 0:
         print("[WARN] No strokes parsed from XML. Abort visualization.")
@@ -117,10 +117,10 @@ def main():
         for s in strokes:
             print(f"[LEN] Stroke {s['index']}: length_px={s['length_px']:.6f} (deg_used={s['deg_used']})")
 
-    # 3) 背景用原图（灰度）
+    # 3) background use the orginal image（grey image）
     gray = load_gray(args.image)
 
-    # 4) 可视化：用 XML 中的 coef_x/coef_y 画拟合曲线
+    # 4) visualization: use the coef_x/coef_y in XML to draw fitting lines
     t_dense = np.linspace(0.0, 1.0, max(200, int(args.dense)), endpoint=True)
 
     fig = plt.figure(figsize=(12, 8))
@@ -130,7 +130,7 @@ def main():
     ax.axis("off")
     ax.set_title("Fitted trajectories from XML (ordered strokes) on original image", fontsize=12)
 
-    # 白色顺序字 + 黑描边：更清楚
+    # White sequential text + black outline: clearer
     pe = patheffects.withStroke(linewidth=3, foreground="black")
 
     for s in strokes:

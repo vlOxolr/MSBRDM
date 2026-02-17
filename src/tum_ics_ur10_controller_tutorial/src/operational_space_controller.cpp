@@ -84,7 +84,7 @@ double quaternionAngularDistance(const Eigen::Quaterniond &qa, const Eigen::Quat
 }
 }  // namespace
 
-// 功能：构造控制器并初始化全部成员变量与默认参数。
+// Function: Construct the controller and initialize all member variables and default parameters
 OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &name)
   : ControlEffort(name, SPLINE_TYPE, JOINT_SPACE, weight),
     model_("ur10_model"),
@@ -150,17 +150,17 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
 {
 }
 
-// 功能：析构控制器对象。
+// Function: Destruct the controller object
 OperationalSpaceControl::~OperationalSpaceControl() {}
 
-// 功能：记录初始关节状态（兼容上层接口）。
+// Function: Record the initial joint state (compatible with upper level interfaces)
 void OperationalSpaceControl::setQInit(const JointState &q_init) { q_init_ = q_init; }
-// 功能：记录 home 关节状态（兼容上层接口）。
+// Function: Record the home joint state (compatible with upper level interfaces)
 void OperationalSpaceControl::setQHome(const JointState &q_home) { q_home_ = q_home; }
-// 功能：记录 park 关节状态（兼容上层接口）。
+// Function: Record the status of the Park joint (compatible with upper level interfaces)
 void OperationalSpaceControl::setQPark(const JointState &q_park) { q_park_ = q_park; }
 
-// 功能：读取参数、初始化模型与 ROS 发布订阅器。
+// Function: Read parameters, initialize models and ROS publish subscribers
 bool OperationalSpaceControl::init()
 {
   ros::NodeHandle nh_private("~");
@@ -365,7 +365,7 @@ bool OperationalSpaceControl::init()
   return true;
 }
 
-// 功能：重置运行时状态并选择初始阶段。
+// Function: Reset the runtime state and select the initial stage
 bool OperationalSpaceControl::start()
 {
   qdot_r_prev_valid_ = false;
@@ -395,13 +395,13 @@ bool OperationalSpaceControl::start()
   return true;
 }
 
-// 功能：停止控制器（当前无额外清理逻辑）。
+// Function: Stop the controller (currently no additional cleanup logic)
 bool OperationalSpaceControl::stop() { return true; }
 
 // -------------------------
 // SAFE/MOVE/DRAW phase selection
 // -------------------------
-// 功能：判断当前关节是否仍需执行 SAFE 收敛。
+// Function: Determine whether the current joint still needs to perform SAFE convergence
 bool OperationalSpaceControl::inSafePhase(const cc::JointPosition &q6) const
 {
   if (!enable_safe_) return false;
@@ -409,14 +409,14 @@ bool OperationalSpaceControl::inSafePhase(const cc::JointPosition &q6) const
   return (e > safe_tol_);
 }
 
-// 功能：检查是否还有未执行的轨迹段。
+// Function: Check if there are any unexecuted trajectory segments
 bool OperationalSpaceControl::hasPendingTrajectory() const
 {
   std::lock_guard<std::mutex> lock(traj_mutex_);
   return current_traj_idx_ < trajectory_batch_.size();
 }
 
-// 功能：按序号读取缓存中的某条轨迹。
+// Function: Get a trajectory from the cache by index
 bool OperationalSpaceControl::getTrajectoryAtIndex(size_t index, PlanarPolynomialTrajectory &traj) const
 {
   std::lock_guard<std::mutex> lock(traj_mutex_);
@@ -425,7 +425,7 @@ bool OperationalSpaceControl::getTrajectoryAtIndex(size_t index, PlanarPolynomia
   return true;
 }
 
-// 功能：提取指定 XML 标签的内部文本。
+// Function: Extract the inner text of a specified XML tag
 bool OperationalSpaceControl::extractXmlTag(const std::string &xml, const std::string &tag, std::string &content)
 {
   const std::regex re("<" + tag + "\\b[^>]*>([\\s\\S]*?)</" + tag + ">", std::regex::icase);
@@ -435,7 +435,7 @@ bool OperationalSpaceControl::extractXmlTag(const std::string &xml, const std::s
   return true;
 }
 
-// 功能：提取指定 XML 属性值。
+// Function: Extract the value of a specified XML attribute
 bool OperationalSpaceControl::extractXmlAttribute(const std::string &xml, const std::string &attr, std::string &value)
 {
   const std::regex re(attr + "\\s*=\\s*\"([^\"]+)\"", std::regex::icase);
@@ -445,7 +445,7 @@ bool OperationalSpaceControl::extractXmlAttribute(const std::string &xml, const 
   return true;
 }
 
-// 功能：将字符串安全转换为 double。
+// Function: Safely convert a string to double
 bool OperationalSpaceControl::toDouble(const std::string &text, double &value)
 {
   try
@@ -461,7 +461,7 @@ bool OperationalSpaceControl::toDouble(const std::string &text, double &value)
   }
 }
 
-// 功能：将字符串安全转换为 int。
+// Function: Safely convert strings to int
 bool OperationalSpaceControl::toInt(const std::string &text, int &value)
 {
   try
@@ -479,7 +479,7 @@ bool OperationalSpaceControl::toInt(const std::string &text, int &value)
   }
 }
 
-// 功能：从文本中解析多项式系数序列。
+// Function: Analyze polynomial coefficient sequences from text
 std::vector<double> OperationalSpaceControl::parseCoefficientList(const std::string &text)
 {
   std::vector<double> coeffs;
@@ -497,7 +497,7 @@ std::vector<double> OperationalSpaceControl::parseCoefficientList(const std::str
   return coeffs;
 }
 
-// 功能：按升幂系数评估多项式值（a_0, a_1, ..., a_n）。
+// Function: Evaluate a polynomial in ascending order of coefficients (a_0, a_1, ..., a_n)
 double OperationalSpaceControl::evalPoly(const std::vector<double> &coeff, double s)
 {
   double value = 0.0;
@@ -510,7 +510,7 @@ double OperationalSpaceControl::evalPoly(const std::vector<double> &coeff, doubl
   return value;
 }
 
-// 功能：按升幂系数评估多项式一阶导数（a_0, a_1, ..., a_n）。
+// Function: Evaluate a polynomial's first derivative in ascending order of coefficients (a_0, a_1, ..., a_n)
 double OperationalSpaceControl::evalPolyDerivative(const std::vector<double> &coeff, double s)
 {
   if (coeff.size() < 2) return 0.0;
@@ -525,7 +525,7 @@ double OperationalSpaceControl::evalPolyDerivative(const std::vector<double> &co
   return value;
 }
 
-// 功能：解析 XML 轨迹批次并重置执行状态机。
+// Function: Parse XML trajectory batch and reset execution state machine
 void OperationalSpaceControl::trajectoryCallback(const std_msgs::String::ConstPtr &msg)
 {
   const std::string xml = msg->data;
@@ -680,7 +680,7 @@ void OperationalSpaceControl::trajectoryCallback(const std_msgs::String::ConstPt
                   << ", order by index, state machine reset to SAFE->MOVE->DRAW.");
 }
 
-// 功能：初始化 MOVE 阶段（SAFE 点到当前轨迹起点的直线）。
+// Function: Initialize the MOVE phase (the line from the SAFE point to the starting point of the current trajectory)
 void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPosition &q6)
 {
   if (move_initialized_) return;
@@ -738,7 +738,7 @@ void OperationalSpaceControl::ensureMoveInit(double t_sec, const cc::JointPositi
                   << " T_draw=" << active_draw_time_);
 }
 
-// 功能：初始化 DRAW 阶段的起始时刻与参考状态。
+// Function: Initialize the DRAW phase's starting time and reference state
 void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPosition &q6)
 {
   if (draw_initialized_) return;
@@ -761,7 +761,7 @@ void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPositi
 // -------------------------
 // Desired trajectory (MOVE)
 // -------------------------
-// 功能：生成 MOVE 阶段的期望笛卡尔位置/速度/姿态。
+// Function: Generate expected Cartesian position/velocity/posture for MOVE stage
 void OperationalSpaceControl::cartesianDesiredMove(
   double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d,
   cc::Rotation3 &Rd, cc::Vector3 &Wd)
@@ -771,7 +771,7 @@ void OperationalSpaceControl::cartesianDesiredMove(
   double tau = t / T;
   if (tau > 1.0) tau = 1.0;
 
-  // 五次最小急动度插值：s(0)=0,s(1)=1 且端点速度加速度为0
+  // Five times minimum jerk interpolation: s (0)=0, s (1)=1, and endpoint velocity acceleration is 0
   const double tau2 = tau * tau;
   const double tau3 = tau2 * tau;
   const double tau4 = tau3 * tau;
@@ -792,7 +792,7 @@ void OperationalSpaceControl::cartesianDesiredMove(
 // -------------------------
 // Desired trajectory (DRAW)
 // -------------------------
-// 功能：生成 DRAW 阶段的期望笛卡尔位置/速度/姿态。
+// Function: Generate expected Cartesian position/velocity/posture for the DRAW stage
 void OperationalSpaceControl::cartesianDesiredDraw(
   double t_sec, cc::Vector3 &Xd, cc::Vector3 &Xdot_d,
   cc::Rotation3 &Rd, cc::Vector3 &Wd)
@@ -861,7 +861,7 @@ void OperationalSpaceControl::cartesianDesiredDraw(
 // -------------------------
 // Pixel-to-world (with 90° CW rotation about z around offset center)
 // -------------------------
-// 功能：将像素坐标转换为世界坐标，并绕 z 轴顺时针旋转 px_rotation_deg_ 度。
+// Function: Convert pixel coordinates to world coordinates and rotate px_rotation_deg1 degrees clockwise around the z-axis
 void OperationalSpaceControl::pixelToWorld(double x_px, double y_px, double &x_w, double &y_w) const
 {
   // Step 1: standard pixel-to-world (centered, without offset)
@@ -875,7 +875,7 @@ void OperationalSpaceControl::pixelToWorld(double x_px, double y_px, double &x_w
   y_w = st * xc + ct * yc + px_offset_y_;
 }
 
-// 功能：将像素速度转换为世界速度，并绕 z 轴顺时针旋转 px_rotation_deg_ 度。
+// Function: Convert pixel speed to world speed and rotate px_rotation_deg1 degrees clockwise around the z-axis
 void OperationalSpaceControl::pixelVelToWorld(double dx_px, double dy_px, double &dx_w, double &dy_w) const
 {
   const double dxc = dx_px * px_scale_x_;
@@ -890,7 +890,7 @@ void OperationalSpaceControl::pixelVelToWorld(double dx_px, double dy_px, double
 // -------------------------
 // Model helpers (FK/J)
 // -------------------------
-// 功能：计算末端在世界系下的位置。
+// Function: Calculate the position of the terminal in the world system
 cc::Vector3 OperationalSpaceControl::fkPos(const cc::JointPosition &q6) const
 {
   const cc::HomogeneousTransformation T_0_B = model_.T_0_B();
@@ -901,7 +901,7 @@ cc::Vector3 OperationalSpaceControl::fkPos(const cc::JointPosition &q6) const
   return X;
 }
 
-// 功能：计算末端在世界系下的姿态。
+// Function: Calculate the posture of the terminal in the world system
 cc::Rotation3 OperationalSpaceControl::fkOri(const cc::JointPosition &q6) const
 {
   const cc::HomogeneousTransformation T_0_B = model_.T_0_B();
@@ -910,7 +910,7 @@ cc::Rotation3 OperationalSpaceControl::fkOri(const cc::JointPosition &q6) const
   return projectToSO3(T.orientation());
 }
 
-// 功能：计算并转换到世界系的 6x6 雅可比矩阵。
+// Function: Calculate and transform the 6x6 Jacobian matrix to the world system.
 OperationalSpaceControl::Matrix6d OperationalSpaceControl::jacobian6(const cc::JointPosition &q6) const
 {
   const cc::Jacobian J_tool_0 = model_.J_tool_0(q6);
@@ -930,7 +930,7 @@ OperationalSpaceControl::Matrix6d OperationalSpaceControl::jacobian6(const cc::J
 // -------------------------
 // DLS
 // -------------------------
-// 功能：用阻尼最小二乘求解 6 维任务到关节速度映射。
+// Function: Use damping least squares to solve the 6-dimensional task to joint velocity mapping
 OperationalSpaceControl::Vector6d
 OperationalSpaceControl::dlsSolve6(const Matrix6d &J, const Vector6d &xdot, double lambda)
 {
@@ -939,7 +939,7 @@ OperationalSpaceControl::dlsSolve6(const Matrix6d &J, const Vector6d &xdot, doub
   return J.transpose() * y;
 }
 
-// 功能：用阻尼最小二乘求解 3 维任务到关节速度映射。
+// Function: Use damping least squares to solve the 3D task to joint velocity mapping
 OperationalSpaceControl::Vector6d
 OperationalSpaceControl::dlsSolve3(const Matrix3x6d &Jp, const cc::Vector3 &xdot_p, double lambda)
 {
@@ -951,7 +951,7 @@ OperationalSpaceControl::dlsSolve3(const Matrix3x6d &Jp, const cc::Vector3 &xdot
 // -------------------------
 // MOVE/DRAW reference qdot_r
 // -------------------------
-// 功能：在 MOVE/DRAW 阶段生成关节参考速度 qdot_r。
+// Function: Generate joint reference velocity qdot_r during MOVE/DRAW stage
 OperationalSpaceControl::Vector6d
 OperationalSpaceControl::computeQdotR_MOVE_and_DRAW(double t_sec, const cc::JointPosition &q6)
 {
@@ -1051,7 +1051,7 @@ OperationalSpaceControl::computeQdotR_MOVE_and_DRAW(double t_sec, const cc::Join
 // -------------------------
 // main update
 // -------------------------
-// 功能：主控制循环，执行 SAFE/MOVE/DRAW 状态机并输出关节力矩。
+// Function: Main control loop, execute SAFE/MOVE/DRAW state machine and output joint torque
 OperationalSpaceControl::Vector6d
 OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
 {
@@ -1205,7 +1205,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     ensureMoveInit(t_sec, q6);
     if (!move_initialized_) return Vector6d::Zero();
 
-    // ===== MOVE 完成判定 =====
+    // ===== MOVE completion judgment =====
     const double t_move = t_sec - t_move0_;
     const double move_pos_err = (fkPos(q6) - move_goal_pos_).norm();
 
@@ -1245,10 +1245,10 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
 
       phase_ = PHASE_DRAW;
       draw_initialized_ = false;
-      qdot_r_prev_valid_ = false;   // 避免 qddot_r 突变
+      qdot_r_prev_valid_ = false;   // Avoid qddot_r mutations
       resetMarkerNewSegment();
 
-      // 过渡周期：用纯阻尼减速，而非零力矩（避免自由漂移一个周期）
+      // Transition period: Use pure damping deceleration instead of zero torque (to avoid free drift for one cycle)
       Vector6d tau_bridge = (-Kd6_) * qP6;
       for (int i = 0; i < 6; ++i)
         tau_bridge(i) = std::max(-tau_max_, std::min(tau_bridge(i), tau_max_));
@@ -1333,7 +1333,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     ensureDrawInit(t_sec, q6);
     if (!draw_initialized_) return Vector6d::Zero();
 
-    // ===== DRAW 完成判定 =====
+    // ===== DRAW completion judgment =====
     double t_draw = t_sec - t_draw0_;
     if (t_draw >= active_draw_time_)
     {
@@ -1371,7 +1371,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     if (qdot_r_prev_valid_ && dt > 1e-6)
       qddot_r = (qdot_r - qdot_r_prev6_) / dt;
       ROS_WARN_STREAM_THROTTLE(0.1,
-        "[REF DEBUG][MOVE] "
+        "[REF DEBUG][DRAW] "
         << "|qdot_r|=" << qdot_r.norm()
         << " |qddot_r|=" << qddot_r.norm()
         << " dt=" << dt
@@ -1467,7 +1467,7 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
 // -------------------------
 // RViz/debug helpers
 // -------------------------
-// 功能：清除 RViz 中已发布的轨迹 Marker。
+// Function: Clear trajectory markers that have been published in RViz
 void OperationalSpaceControl::publishDeleteAllMarkers()
 {
   visualization_msgs::Marker clear;
@@ -1482,7 +1482,7 @@ void OperationalSpaceControl::publishDeleteAllMarkers()
   }
 }
 
-// 功能：开启新的轨迹段并重置 Marker 缓冲。
+// Function: Open a new trajectory segment and reset the Marker buffer
 void OperationalSpaceControl::resetMarkerNewSegment()
 {
   traj_marker_.id += 1;
@@ -1496,7 +1496,7 @@ void OperationalSpaceControl::resetMarkerNewSegment()
   actual_traj_marker_.header.stamp = ros::Time::now();
 }
 
-// 功能：发布控制调试信息与关节力矩状态。
+// Function: Publish control debugging information and joint torque status
 void OperationalSpaceControl::publishControlDebug(
   double t_sec, const std::string &phase, const JointState &state, const Vector6d &tau_cmd)
 {
