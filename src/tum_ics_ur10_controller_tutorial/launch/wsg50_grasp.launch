@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<launch>
+
+  <!-- ===== Hardcoded grasp parameters (modify here) ===== -->
+  <arg name="gripper_width" default="15.0" />   <!-- grasp width in mm -->
+  <arg name="gripper_speed" default="30.0" />   <!-- grasp speed in mm/s -->
+  <arg name="gripper_force" default="10" />     <!-- grasping force in N -->
+  <arg name="gripper_ip"    default="192.168.1.20" />
+
+  <!-- 1) Start WSG-50 driver (remap joint_states to avoid conflict with UR10) -->
+  <include file="$(find wsg_50_driver)/launch/wsg_50_tcp_script.launch">
+    <arg name="force"  value="$(arg gripper_force)" />
+    <arg name="remap"  value="true" />
+  </include>
+
+  <!-- 2) Wait for driver ready, then call grasp service -->
+  <node name="gripper_grasp_init"
+        pkg="tum_ics_ur10_controller_tutorial"
+        type="gripper_grasp_init.py"
+        output="screen">
+    <param name="grasp_width" value="$(arg gripper_width)" />
+    <param name="grasp_speed" value="$(arg gripper_speed)" />
+  </node>
+
+</launch>
