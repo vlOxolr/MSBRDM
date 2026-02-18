@@ -811,7 +811,7 @@ def main():
     binary2 = tophat > TH_T
 
     # --- Step 4: Opening ---
-    OPEN_R = 2
+    OPEN_R = 1
     opened = opening(binary2, disk(OPEN_R))
 
     # --- Step 5: Closing (+ extra opening) ---
@@ -922,7 +922,7 @@ def main():
     ordered_strokes = order_strokes_by_lefttop_endpoints(strokes_smooth)
     print("[INFO] ordered_strokes: {}".format(len(ordered_strokes)))
 
-    POLY_DEG = 50  # TODO: tune later
+    POLY_DEG = 10  # TODO: tune later
     poly_list = []  # list of (coef_x, coef_y) or None if failed
 
     for i, st in enumerate(ordered_strokes):
