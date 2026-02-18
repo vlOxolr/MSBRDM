@@ -29,7 +29,7 @@ catkin build -DTUM_ICS_USE_QT5=1
 source devel/setup.bash
 ```
 
-## 4. Launch Commands (4 terminals recommended)
+## 4. Launch Commands (5 terminals recommended)
 
 Terminal A:
 
@@ -45,14 +45,31 @@ source devel/setup.bash
 roslaunch tum_ics_ur10_bringup bringUR10-FT-wsg-50.launch
 ```
 
-Terminal C:
+Terminal C (FT sensor):
+
+Once the sensor is ready and calibrated, add the `tum_ics_schunk_netbox` package to the `src` folder of your catkin workspace and compile. Then launch the sensor publisher node:
+
+```bash
+source devel/setup.bash
+roslaunch tum_ics_schunk_netbox sensor_publisher.launch
+```
+
+You can verify the sensor data by echoing the topic:
+
+```bash
+rostopic echo /schunk_netbox/raw
+```
+
+You can visualize the applied wrench by loading the RViz plugin for stamped wrenches.
+
+Terminal D:
 
 ```bash
 source devel/setup.bash
 roslaunch tum_ics_ur10_controller_tutorial operational_space_controller.launch
 ```
 
-Terminal D (publish trajectory):
+Terminal E (publish trajectory):
 
 ```bash
 source devel/setup.bash
@@ -110,6 +127,8 @@ If drawing is shifted or the start point is wrong, tune `pixel_to_world` (`scale
   - `/ur10/task_space_error` (`std_msgs/Float64MultiArray`)
   - `/ur10/joint_effort_debug` (`std_msgs/Float64MultiArray`)
   - `/ur10/joint_effort_state` (`sensor_msgs/JointState`)
+- FT sensor:
+  - `/schunk_netbox/raw` (`geometry_msgs/WrenchStamped`) — published on link `ft_sensor_link`
 
 ## 8. Troubleshooting
 
