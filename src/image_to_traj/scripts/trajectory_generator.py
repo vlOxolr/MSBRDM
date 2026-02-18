@@ -76,7 +76,7 @@ class TrajectoryGenerator:
         th_h: int = 50,
         th_w: int = 50,
         th_t: float = 0.2,
-        open_r: int = 1,
+        open_r: int = 2,
         close_r: int = 2,
         # junction clustering + filtering
         j_radius: float = 20.0,
@@ -86,7 +86,7 @@ class TrajectoryGenerator:
         smooth_window: int = 9,
         smooth_iters: int = 2,
         # polynomial fit + curve length
-        poly_deg: int = 10,
+        poly_deg: int = 50,
         length_samples: int = 1200,
     ):
         self.th_h = th_h
