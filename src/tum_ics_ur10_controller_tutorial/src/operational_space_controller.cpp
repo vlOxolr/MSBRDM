@@ -2,6 +2,7 @@
 
 #include <ros/ros.h>
 #include <control_core/math/error_functions.h>
+#include <geometry_msgs/WrenchStamped.h>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -146,7 +147,13 @@ OperationalSpaceControl::OperationalSpaceControl(double weight, const QString &n
     tau_max_(120.0),
     qdot_r_max_(2.0),
     xdot_r_max_(0.25),
-    wdot_r_max_(0.80)
+    wdot_r_max_(0.80),
+    force_target_z_(20.0),
+    force_z_sign_(1.0),
+    force_k_z_(0.00005),
+    current_force_z_(0.0),
+    draw_z_offset_(0.0),
+    force_prev_time_sec_(0.0)
 {
 }
 
@@ -265,6 +272,9 @@ bool OperationalSpaceControl::init()
   ros::param::get(ns + "/draw/fixed_z", fixed_draw_z_);
   if (draw_time_ <= 1e-3) draw_time_ = 20.0;
   ros::param::get(ns + "/draw/blend_ratio", draw_blend_ratio_);
+  ros::param::get(ns + "/draw/force_target_z", force_target_z_);
+  ros::param::get(ns + "/draw/force_z_sign", force_z_sign_);
+  ros::param::get(ns + "/draw/force_k_i_z", force_k_z_);
 
   // pixel-to-world transform
   ros::param::get(ns + "/pixel_to_world/scale_x", px_scale_x_);
@@ -325,6 +335,7 @@ bool OperationalSpaceControl::init()
   effort_debug_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/ur10/joint_effort_debug", 1);
   effort_joint_state_pub_ = nh_.advertise<sensor_msgs::JointState>("/ur10/joint_effort_state", 1);
   traj_sub_ = nh_.subscribe(traj_topic_, 1, &OperationalSpaceControl::trajectoryCallback, this);
+  wrench_sub_ = nh_.subscribe("/schunk_netbox/raw", 1, &OperationalSpaceControl::wrenchCallback, this);
 
   publishDeleteAllMarkers();
 
@@ -360,6 +371,9 @@ bool OperationalSpaceControl::init()
                   << " enable_draw=" << (enable_draw_ ? 1 : 0)
                   << " draw_time=" << draw_time_
                   << " draw_speed=" << draw_speed_
+                  << " force_target_z=" << force_target_z_
+                  << " force_z_sign=" << force_z_sign_
+                  << " force_k_i_z=" << force_k_z_
                   << " traj_topic=" << traj_topic_);
 
   return true;
@@ -380,6 +394,8 @@ bool OperationalSpaceControl::start()
   active_traj_valid_ = false;
   active_move_time_ = move_time_;
   active_draw_time_ = draw_time_;
+  draw_z_offset_ = 0.0;
+  force_prev_time_sec_ = 0.0;
 
   // phase select at start
   if (enable_safe_)
@@ -752,7 +768,11 @@ void OperationalSpaceControl::ensureDrawInit(double t_sec, const cc::JointPositi
   if (!use_fixed_draw_z_) active_draw_z_ = X_start_(2);
   t_draw0_ = t_sec;
   R_draw_ = projectToSO3(fkOri(q6));
+  draw_z_offset_ = 0.0;
+  force_prev_time_sec_ = t_sec;
   draw_initialized_ = true;
+  draw_z_offset_ = 0.0;
+  
 
   ROS_WARN_STREAM("[OperationalSpaceControl] DRAW init: X_start=" << X_start_.transpose()
                   << " t_draw0=" << t_draw0_);
@@ -819,7 +839,53 @@ void OperationalSpaceControl::cartesianDesiredDraw(
   double path_x_w, path_y_w;
   pixelToWorld(x_px, y_px, path_x_w, path_y_w);
   cc::Vector3 X_path;
-  X_path << path_x_w, path_y_w, active_draw_z_;
+  
+
+  double z_cmd = active_draw_z_;
+
+  // Only apply force control in DRAW
+  if (phase_ == PHASE_DRAW)
+  {
+    if (force_prev_time_sec_ <= 0.0 || !std::isfinite(force_prev_time_sec_))
+      force_prev_time_sec_ = t_sec;
+
+    double dt_force = t_sec - force_prev_time_sec_;
+    if (!std::isfinite(dt_force) || dt_force <= 0.0) dt_force = 1e-3;
+    dt_force = std::min(dt_force, 0.05);
+
+    const double Fz_eff = force_z_sign_ * current_force_z_;
+    double F_error = force_target_z_ - Fz_eff;
+
+    // One-way accumulation: only integrate when force is below target.
+    // If force is above target (F_error <= 0), keep the current offset.
+    if (F_error < 2.0)
+    {
+      if (F_error < -10.0)
+        {
+        if (draw_z_offset_ > -0.008)
+          draw_z_offset_ += force_k_z_ * F_error * dt_force;
+        else
+          draw_z_offset_ = - 0.008;
+        }
+
+      else
+        draw_z_offset_ += force_k_z_ * F_error * dt_force;
+    }
+
+    z_cmd = active_draw_z_ + draw_z_offset_;
+    force_prev_time_sec_ = t_sec;
+
+    ROS_INFO_STREAM_THROTTLE(1.0,
+      "[FORCE CTRL] Fz_raw=" << current_force_z_
+      << " Fz_eff=" << Fz_eff
+      << " F_err=" << F_error
+      << " dt=" << dt_force
+      << " z_offset=" << draw_z_offset_
+      << " z_cmd=" << z_cmd);
+  }
+
+  X_path << path_x_w, path_y_w, z_cmd;
+
 
   // --- Force first DRAW point to exactly match MOVE goal ---
   if (t < 1e-6)   // first control tick after DRAW init
@@ -1530,6 +1596,14 @@ void OperationalSpaceControl::publishControlDebug(
   }
   effort_joint_state_pub_.publish(js);
 }
+
+void OperationalSpaceControl::wrenchCallback(
+  const geometry_msgs::WrenchStamped::ConstPtr &msg)
+{
+  if (std::isfinite(msg->wrench.force.z))
+    current_force_z_ = msg->wrench.force.z;
+}
+
 
 } // namespace RobotControllers
 } // namespace tum_ics_ur_robot_lli

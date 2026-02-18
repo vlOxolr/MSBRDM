@@ -15,6 +15,8 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <geometry_msgs/WrenchStamped.h> 
+#include <ros/ros.h>
 
 namespace tum_ics_ur_robot_lli
 {
@@ -150,6 +152,15 @@ private:
   double xdot_r_max_;
   double wdot_r_max_;
 
+  double force_target_z_;      // desired contact force [N]
+  double force_z_sign_;        // effective Fz = force_z_sign_ * raw sensor Fz
+  double force_k_z_;           // integral gain [m/(N*s)]
+  double current_force_z_;     // latest measured force (raw)
+  double draw_z_offset_;       // accumulated z offset [m]
+  double force_prev_time_sec_; // timestamp for force integration
+  
+  ros::Subscriber wrench_sub_;
+
   // RViz visualization (kept; you can remove later)
   ros::Publisher traj_pub_;
   ros::Publisher actual_traj_pub_;
@@ -213,6 +224,8 @@ private:
   // Damped Least Squares
   static Vector6d dlsSolve6(const Matrix6d &J, const Vector6d &xdot, double lambda = 0.05);
   static Vector6d dlsSolve3(const Matrix3x6d &Jp, const cc::Vector3 &xdot_p, double lambda = 0.03);
+
+  void wrenchCallback(const geometry_msgs::WrenchStamped::ConstPtr &msg);
 };
 
 } // namespace RobotControllers

@@ -3,7 +3,7 @@ operational_space_ctrl:
   enable_move: true
   enable_draw: true
 
-  safe_tol: 0.05
+  safe_tol: 0.06
   q_safe: [0.001, -0.8998, 1.2470, -1.9591, -1.56276, 0.8]  # q_safe: [0, -0.7, 0.7, -1, 0.3, 1]
 
   Kp_safe: [5,  1, 1, 0.2, 0.2, 1]
@@ -27,8 +27,8 @@ operational_space_ctrl:
   pixel_to_world:
     scale_x:  0.0002  # meters per pixel-col → world X (negative to flip)
     scale_y: -0.0002  # meters per pixel-row → world Y (negative: image-down → world-up)
-    offset_x: 1.2    # world X offset (meters)
-    offset_y: 0.239   # world Y offset (meters), tuned to keep first goal y near -0.65
+    offset_x: 1.1    # world X offset (meters)
+    offset_y: 0.339   # world Y offset (meters), tuned to keep first goal y near -0.65
     rotation_deg: 90.0  # CW rotation about z-axis (degrees), 0=no rotation
 
   move:
@@ -43,6 +43,9 @@ operational_space_ctrl:
     use_fixed_z: true
     fixed_z: 0.0805
     blend_ratio: 0.1   # fraction of T_draw for velocity ramp-up at DRAW start
+    force_target_z: 20.0   # desired contact force [N]
+    force_z_sign: 1.0      # effective Fz = force_z_sign * raw_Fz; set -1.0 if sign is opposite
+    force_k_i_z: 0.00015     # integral gain [m/(N*s)]
 
   trajectory:
     topic: /ur10/planar_polynomial_trajectories  # std_msgs/String XML
