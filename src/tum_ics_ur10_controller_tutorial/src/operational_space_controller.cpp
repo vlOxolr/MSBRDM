@@ -19,15 +19,8 @@ namespace RobotControllers
 namespace
 {
 constexpr double kQuatNormEps = 1e-12;
-constexpr double kSmallAngleEps = 1e-8;
 constexpr double kMoveHardTimeoutFactor = 2.0;
 constexpr double kJointVelGuardThreshold = 35.0;
-constexpr double kDrawTorqueRampTime = 0.5;
-
-bool isFiniteVec3(const Eigen::Vector3d &v)
-{
-  return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
-}
 
 bool isFiniteQuat(const Eigen::Quaterniond &q)
 {
@@ -1478,15 +1471,6 @@ OperationalSpaceControl::update(const RobotTime &time, const JointState &state)
     tau = (-Kd6_) * s + tau_ff;
 
     // Soften MOVE->DRAW transition: blend from pure damping to full DRAW torque.
-    // if (t_draw < kDrawTorqueRampTime)
-    // {
-    //   const double beta = smoothStepQuintic01(t_draw / kDrawTorqueRampTime);
-    //   Vector6d tau_damp = (-Kd_safe6_) * qP6;
-    //   for (int i = 0; i < 6; ++i)
-    //     tau_damp(i) = std::max(-tau_max_, std::min(tau_damp(i), tau_max_));
-    //   tau = (1.0 - beta) * tau_damp + beta * tau;
-    // }
-
     applyVelocityGuard(tau, "DRAW");
 
     for (int i = 0; i < 6; ++i)
